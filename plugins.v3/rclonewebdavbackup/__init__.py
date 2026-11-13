@@ -33,7 +33,7 @@ class RcloneWebdavBackup(_PluginBase):
     plugin_name = "Rclone WebDAV 增量备份"
     plugin_desc = "通过 rclone RC 将 Alist WebDAV 增量备份到 CloudDrive2，并使用 SQLite 保存备份历史。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "OpenAI"
     author_url = "https://github.com/"
     plugin_config_prefix = "rclonewebdavbackup_"
