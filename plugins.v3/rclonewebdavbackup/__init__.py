@@ -71,7 +71,6 @@ class RcloneWebdavBackup(_PluginBase):
         self._config.setdefault("rc_timeout", 60)
         self._config.setdefault("rc_user", "")
         self._config.setdefault("rc_password", "")
-        self._config.setdefault("verify_after_copy", True)
         self._config.setdefault("onlyonce", False)
 
         data_dir = Path(self.get_data_path())
@@ -103,7 +102,6 @@ class RcloneWebdavBackup(_PluginBase):
                     {"component": "VSlider", "props": {"model": "concurrency", "label": "并发文件数", "min": 1, "max": 16, "step": 1}},
                     {"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式", "hint": "默认每 30 分钟：*/30 * * * *"}},
                     {"component": "VTextField", "props": {"model": "rc_timeout", "label": "RC 请求超时（秒）", "type": "number"}},
-                    {"component": "VSwitch", "props": {"model": "verify_after_copy", "label": "上传后校验目标文件存在及大小"}},
                     {"component": "VSwitch", "props": {"model": "onlyonce", "label": "保存后立即执行一次"}},
                 ],
             }
@@ -112,7 +110,7 @@ class RcloneWebdavBackup(_PluginBase):
             "rc_user": "", "rc_password": "", "source_remote": "Alist",
             "source_path": "", "destination_remote": "CloudDrive2",
             "destination_path": "", "concurrency": 4, "cron": "*/30 * * * *",
-            "rc_timeout": 60, "verify_after_copy": True, "onlyonce": False,
+            "rc_timeout": 60, "onlyonce": False,
         }
 
     def get_page(self) -> list[dict]:
@@ -347,7 +345,7 @@ class RcloneWebdavBackup(_PluginBase):
             if item.get("IsDir") is not True and int(item.get("Size", -1)) >= 0
         ]
 
-    def _copy_and_verify(self, task: dict) -> None:
+    def _copy_file(self, task: dict) -> None:
         rel = self._clean_rel(task["rel_path"])
         source_root = self._remote_root(self._config.get("source_remote"), self._config.get("source_path", ""))
         destination_root = self._remote_root(self._config.get("destination_remote"), self._config.get("destination_path", ""))
@@ -385,23 +383,6 @@ class RcloneWebdavBackup(_PluginBase):
             else:
                 raise RuntimeError("插件停止，copy 任务未完成")
 
-        if not self._config.get("verify_after_copy", True):
-            # 即使关闭严格校验，也不允许在未确认目标存在及大小时记成功。
-            logger.warning("[RcloneWebdavBackup] verify_after_copy 关闭，但成功条件仍强制执行大小校验")
-
-        stat = self._rc("operations/stat", {
-            "fs": destination_root,
-            "remote": rel,
-        })
-        obj = stat.get("item") or stat
-        if not obj or obj.get("IsDir") is True:
-            raise RuntimeError("上传后校验失败：目标文件不存在或不是文件")
-        target_size = obj.get("Size")
-        if target_size is None or int(target_size) != int(task["size"]):
-            raise RuntimeError(
-                f"上传后校验失败：源大小={task['size']}，目标大小={target_size}"
-            )
-
     # -------------------------- Worker --------------------------
 
     def _start_worker(self) -> bool:
@@ -424,6 +405,7 @@ class RcloneWebdavBackup(_PluginBase):
         started = self._now()
         summary = {"scanned": 0, "inserted": 0, "skipped": 0, "success": 0, "failed": 0}
         self._runtime_status = "running"
+        self._last_summary = dict(summary)
         try:
             with self._connect() as conn:
                 cur = conn.execute("""
@@ -437,6 +419,7 @@ class RcloneWebdavBackup(_PluginBase):
             scanned, inserted = self._insert_scan(files)
             summary["scanned"], summary["inserted"] = scanned, inserted
             summary["skipped"] = max(0, scanned - inserted)
+            self._last_summary = dict(summary)
 
             workers = max(1, min(16, int(self._config.get("concurrency") or 4)))
 
@@ -444,7 +427,7 @@ class RcloneWebdavBackup(_PluginBase):
                 if self._stop_event.is_set():
                     return False, "插件停止"
                 try:
-                    self._copy_and_verify(task)
+                    self._copy_file(task)
                     self._set_task(task["id"], "success")
                     return True, ""
                 except Exception as err:
@@ -466,6 +449,7 @@ class RcloneWebdavBackup(_PluginBase):
                     futures.remove(done)
                     ok, _ = done.result()
                     summary["success" if ok else "failed"] += 1
+                    self._last_summary = dict(summary)
 
             self._runtime_status = "stopped" if self._stop_event.is_set() else "idle"
             message = "任务已停止" if self._stop_event.is_set() else "备份执行完成"

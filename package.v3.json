@@ -3,7 +3,7 @@
     "name": "Rclone WebDAV 增量备份",
     "description": "通过 Rclone RC 将 Alist WebDAV 增量备份到 CloudDrive2，SQLite 记录路径和大小并支持并发、定时及失败续跑。",
     "labels": "备份,WebDAV,Rclone",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "Moviepilot_A.png",
     "author": "OpenAI",
     "level": 1,
