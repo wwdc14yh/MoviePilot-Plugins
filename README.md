@@ -2,13 +2,14 @@
 
 ## 功能
 - Alist WebDAV Remote → CloudDrive2 WebDAV Remote。
-- 通过 `http://<rclone-host>:5572/core/command` 调用 `rclone lsjson` 和逐文件 `rclone copy`。
+- 通过 rclone RC `operations/list` 递归扫描源目录，再通过 `core/command` 逐文件执行 `rclone copy`。
 - SQLite 文件身份：源相对路径 + 文件大小。
-- 仅当目标 stat 存在且大小一致时登记 `success`。
+- 每次扫描到的相对路径整理为一条当前记录；文件大小变化时更新记录并重新备份，不保留该路径旧大小的历史记录。
+- copy 命令完成后检查目标文件存在且大小与源文件一致，校验通过才登记 `success`。
 - 成功记录永久跳过，不检查目标是否仍存在；目标被删除不会触发重复上传。
-- 文件大小变化会形成新的身份记录；同路径同大小内容变化按需求跳过。
+- 文件大小变化会更新当前记录并触发重新备份；同路径同大小内容变化按需求跳过。
 - 可配置并发数（1～16）、Cron、RC 地址和认证。
-- 任务状态 API：pending/running/success/failed；失败任务下次自动重试。
+- 任务状态 API：pending/running/success/failed；失败任务在该文件仍出现在扫描结果且大小未变时重试。
 
 ## 安装
 将 `plugins.v3/rclonewebdavbackup/` 放入 MoviePilot 插件仓库的同名目录，并将 `RcloneWebdavBackup` 条目合并到 `package.v3.json`。在 V3 宿主安装/更新插件。
@@ -39,9 +40,9 @@ Remote 名称必须已存在于 rclone 配置中，例如 `Alist:`、`CloudDrive
 
 ## 身份与边界说明
 - SQLite 中 `UNIQUE(plugin_id, rel_path, size)` 是唯一键。
-- 扫描仅插入未登记身份；已有 success 不会因目标缺失而重新上传。
-- 同一路径不同大小会插入新版本任务。
+- 扫描以路径和大小匹配成功记录；已有 success 不会因目标缺失而重新上传。
+- 同一路径大小变化会覆盖该路径的旧任务记录并重新备份。
 - 相同路径和大小但内容不同无法识别，符合指定身份规则。
 - 如果源文件在扫描后被修改，本次 copy 按执行时的源文件内容进行；后续扫描仅在文件大小变化时创建新任务。
-- 本版本按文件调用 RC `core/command`，每个文件独立 copy；并发数控制同时执行的文件任务数。
-- copy 命令完成且无报错即标记 success，不额外查询或比较目标文件大小。
+- 每次运行只处理本次扫描中尚未成功的路径+大小；旧版本或已从源目录移除的失败任务不会被误当作当前待处理任务。
+- 本版本按文件调用 RC `core/command`，每个文件独立 copy；完成后经 `operations/stat` 校验目标大小；copy 或校验异常均记录为失败。并发数控制同时执行的文件任务数。

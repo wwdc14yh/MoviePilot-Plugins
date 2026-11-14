@@ -33,7 +33,7 @@ class RcloneWebdavBackup(_PluginBase):
     plugin_name = "Rclone WebDAV 增量备份"
     plugin_desc = "通过 rclone RC 将 Alist WebDAV 增量备份到 CloudDrive2，并使用 SQLite 保存备份历史。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "OpenAI"
     author_url = "https://github.com/"
     plugin_config_prefix = "rclonewebdavbackup_"
@@ -222,8 +222,10 @@ class RcloneWebdavBackup(_PluginBase):
                 (self._now(), self._plugin_id()),
             )
 
-    def _insert_scan(self, files: list[dict]) -> tuple[int, int]:
-        scanned, inserted = len(files), 0
+    def _insert_scan(self, files: list[dict]) -> tuple[int, int, int, list[dict]]:
+        scanned, inserted, skipped = len(files), 0, 0
+        pending = []
+        seen_ids = set()
         now = self._now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -234,13 +236,50 @@ class RcloneWebdavBackup(_PluginBase):
                 size = int(item.get("Size", -1))
                 if size < 0:
                     continue
-                cur = conn.execute("""
-                    INSERT OR IGNORE INTO backup_tasks
-                    (plugin_id, rel_path, size, status, created_at, updated_at)
-                    VALUES (?, ?, ?, 'pending', ?, ?)
-                """, (self._plugin_id(), rel, size, now, now))
-                inserted += cur.rowcount
-        return scanned, inserted
+                existing = conn.execute("""
+                    SELECT id, size, status FROM backup_tasks
+                    WHERE plugin_id=? AND rel_path=? ORDER BY id
+                """, (self._plugin_id(), rel)).fetchall()
+                row = next((record for record in existing if record["size"] == size), None)
+                if row is None and existing:
+                    row = existing[-1]
+                    conn.execute("""
+                        DELETE FROM backup_tasks
+                        WHERE plugin_id=? AND rel_path=? AND id!=?
+                    """, (self._plugin_id(), rel, row["id"]))
+                    conn.execute("""
+                        UPDATE backup_tasks
+                        SET size=?, status='pending', backup_time=NULL, attempts=0,
+                            error=NULL, created_at=?, updated_at=?
+                        WHERE id=? AND plugin_id=?
+                    """, (size, now, now, row["id"], self._plugin_id()))
+                    inserted += 1
+                elif row is None:
+                    cur = conn.execute("""
+                        INSERT INTO backup_tasks
+                        (plugin_id, rel_path, size, status, created_at, updated_at)
+                        VALUES (?, ?, ?, 'pending', ?, ?)
+                    """, (self._plugin_id(), rel, size, now, now))
+                    inserted += cur.rowcount
+                    row = conn.execute("""
+                        SELECT id, size, status FROM backup_tasks
+                        WHERE id=? AND plugin_id=?
+                    """, (cur.lastrowid, self._plugin_id())).fetchone()
+                else:
+                    conn.execute("""
+                        DELETE FROM backup_tasks
+                        WHERE plugin_id=? AND rel_path=? AND id!=?
+                    """, (self._plugin_id(), rel, row["id"]))
+                row = conn.execute("""
+                    SELECT id, rel_path, size, status FROM backup_tasks
+                    WHERE id=? AND plugin_id=?
+                """, (row["id"], self._plugin_id())).fetchone()
+                if row["status"] == "success":
+                    skipped += 1
+                elif row["id"] not in seen_ids:
+                    pending.append(dict(row))
+                    seen_ids.add(row["id"])
+        return scanned, inserted, skipped, pending
 
     @staticmethod
     def _clean_rel(value: str) -> str:
@@ -252,24 +291,15 @@ class RcloneWebdavBackup(_PluginBase):
             raise ValueError(f"非法相对路径：{value}")
         return normalized
 
-    def _claim_one(self) -> dict | None:
+    def _claim_task(self, task_id: int) -> bool:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("""
-                SELECT id, rel_path, size FROM backup_tasks
-                WHERE plugin_id=? AND status IN ('pending', 'failed')
-                ORDER BY id LIMIT 1
-            """, (self._plugin_id(),)).fetchone()
-            if not row:
-                return None
             cur = conn.execute("""
                 UPDATE backup_tasks
                 SET status='running', attempts=attempts+1, error=NULL, updated_at=?
-                WHERE id=? AND status IN ('pending', 'failed')
-            """, (self._now(), row["id"]))
-            if cur.rowcount != 1:
-                return None
-            return dict(row)
+                WHERE id=? AND plugin_id=? AND status IN ('pending', 'failed')
+            """, (self._now(), task_id, self._plugin_id()))
+            return cur.rowcount == 1
 
     def _set_task(self, task_id: int, status: str, error: str | None = None) -> None:
         with self._connect() as conn:
@@ -327,23 +357,29 @@ class RcloneWebdavBackup(_PluginBase):
         source = self._remote_root(
             self._config.get("source_remote"), self._config.get("source_path", "")
         )
-        result = self._rc("core/command", {
-            "command": "lsjson",
-            "arg": [source, "--recursive", "--files-only", "--no-mimetype", "--no-modtime"],
-            "opt": {},
-            "returnType": "COMBINED_OUTPUT",
+        result = self._rc("operations/list", {
+            "fs": source,
+            "remote": "",
+            "opt": {"recurse": True, "filesOnly": True},
         }, timeout=max(int(self._config.get("rc_timeout") or 60), 300))
-        if result.get("error"):
-            raise RuntimeError(f"rclone lsjson 失败：{result.get('result', '')}")
-        try:
-            entries = json.loads(result.get("result") or "[]")
-        except Exception as err:
-            raise RuntimeError(f"无法解析 lsjson 返回：{err}") from err
-        return [
-            {"Path": self._clean_rel(item.get("Path", "")), "Size": int(item.get("Size", -1))}
-            for item in entries
-            if item.get("IsDir") is not True and int(item.get("Size", -1)) >= 0
-        ]
+        entries = result.get("list")
+        if not isinstance(entries, list):
+            raise RuntimeError("operations/list 未返回有效文件列表")
+
+        files = []
+        for item in entries:
+            if not isinstance(item, dict) or item.get("IsDir") is True:
+                continue
+            path, size = item.get("Path"), item.get("Size")
+            if (not isinstance(path, str) or not path
+                    or isinstance(size, bool) or not isinstance(size, (int, float))
+                    or size < 0):
+                continue
+            rel = self._clean_rel(path)
+            if rel:
+                files.append({"Path": rel, "Size": int(size)})
+        files.sort(key=lambda item: item["Path"])
+        return files
 
     def _copy_file(self, task: dict) -> None:
         rel = self._clean_rel(task["rel_path"])
@@ -367,14 +403,18 @@ class RcloneWebdavBackup(_PluginBase):
             "_async": True,
             "returnType": "COMBINED_OUTPUT",
         }, timeout=int(self._config.get("rc_timeout") or 60))
+        if not isinstance(result, dict):
+            raise RuntimeError("rclone copy 返回结构异常")
         job_id = result.get("jobid")
-        if not job_id:
-            # 兼容某些 RC 版本同步返回结果
-            if result.get("error"):
-                raise RuntimeError(f"rclone copy 失败：{result.get('result', result)}")
-        else:
+        if result.get("error"):
+            raise RuntimeError(f"rclone copy 失败：{str(result['error'])[:300]}")
+        if job_id:
             while not self._stop_event.is_set():
                 state = self._rc("job/status", {"jobid": job_id})
+                if not isinstance(state, dict):
+                    raise RuntimeError("rclone copy 任务状态返回结构异常")
+                if state.get("error"):
+                    raise RuntimeError(f"rclone copy 失败：{str(state['error'])[:300]}")
                 if state.get("finished"):
                     if state.get("success") is not True:
                         raise RuntimeError(f"rclone copy 失败：{state.get('error') or state}")
@@ -383,6 +423,23 @@ class RcloneWebdavBackup(_PluginBase):
             else:
                 raise RuntimeError("插件停止，copy 任务未完成")
 
+        stat = self._rc(
+            "operations/stat",
+            {"fs": destination_root, "remote": rel},
+            timeout=min(int(self._config.get("rc_timeout") or 60), 60),
+        )
+        if isinstance(stat, dict) and stat.get("error"):
+            raise RuntimeError(f"目标文件 stat 失败：{str(stat['error'])[:300]}")
+        stat_item = stat.get("item") if isinstance(stat, dict) else None
+        if not isinstance(stat_item, dict):
+            raise RuntimeError("目标文件 stat 未返回有效 item，未登记成功")
+        target_size = stat_item.get("Size")
+        if isinstance(target_size, bool) or not isinstance(target_size, (int, float)):
+            raise RuntimeError("目标文件 stat 未返回有效 Size，未登记成功")
+        if int(target_size) != int(task["size"]):
+            raise RuntimeError(
+                f"目标大小校验失败：源 {task['size']} 字节，目标 {int(target_size)} 字节"
+            )
     # -------------------------- Worker --------------------------
 
     def _start_worker(self) -> bool:
@@ -416,9 +473,9 @@ class RcloneWebdavBackup(_PluginBase):
 
             self._reset_interrupted()
             files = self._list_source()
-            scanned, inserted = self._insert_scan(files)
+            scanned, inserted, skipped, pending = self._insert_scan(files)
             summary["scanned"], summary["inserted"] = scanned, inserted
-            summary["skipped"] = max(0, scanned - inserted)
+            summary["skipped"] = skipped
             self._last_summary = dict(summary)
 
             workers = max(1, min(16, int(self._config.get("concurrency") or 4)))
@@ -431,17 +488,24 @@ class RcloneWebdavBackup(_PluginBase):
                     self._set_task(task["id"], "success")
                     return True, ""
                 except Exception as err:
-                    self._set_task(task["id"], "failed", str(err))
-                    logger.error(f"[RcloneWebdavBackup] FAILED {task['rel_path']}: {err}")
-                    return False, str(err)
+                    safe_error = f"{type(err).__name__}: {err}"
+                    self._set_task(task["id"], "failed", safe_error)
+                    logger.error(f"[RcloneWebdavBackup] FAILED {task['rel_path']}: {safe_error}")
+                    return False, safe_error
 
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rclone-copy") as pool:
                 futures = set()
+                pending_tasks = iter(pending)
+                exhausted = False
                 while not self._stop_event.is_set():
-                    while len(futures) < workers:
-                        task = self._claim_one()
-                        if not task:
+                    while len(futures) < workers and not exhausted:
+                        try:
+                            task = next(pending_tasks)
+                        except StopIteration:
+                            exhausted = True
                             break
+                        if not self._claim_task(task["id"]):
+                            continue
                         futures.add(pool.submit(process_one, task))
                     if not futures:
                         break
