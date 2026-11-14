@@ -10,6 +10,7 @@
 - 文件大小变化会更新当前记录并触发重新备份；同路径同大小内容变化按需求跳过。
 - 可配置并发数（1～16）、Cron、RC 地址和认证。
 - 任务状态 API：pending/running/success/failed；失败任务在该文件仍出现在扫描结果且大小未变时重试。
+- 任务日志包含运行/任务 ID、文件路径与大小、重试次数、copy/job/stat 阶段、耗时、进度及失败详情。
 
 ## 安装
 将 `plugins.v3/rclonewebdavbackup/` 放入 MoviePilot 插件仓库的同名目录，并将 `RcloneWebdavBackup` 条目合并到 `package.v3.json`。在 V3 宿主安装/更新插件。

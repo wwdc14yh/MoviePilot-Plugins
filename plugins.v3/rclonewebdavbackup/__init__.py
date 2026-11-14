@@ -33,7 +33,7 @@ class RcloneWebdavBackup(_PluginBase):
     plugin_name = "Rclone WebDAV 增量备份"
     plugin_desc = "通过 rclone RC 将 Alist WebDAV 增量备份到 CloudDrive2，并使用 SQLite 保存备份历史。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "OpenAI"
     author_url = "https://github.com/"
     plugin_config_prefix = "rclonewebdavbackup_"
@@ -61,9 +61,9 @@ class RcloneWebdavBackup(_PluginBase):
         self._stop_event = threading.Event()
         self._config = dict(config or {})
         self._enabled = bool(self._config.get("enabled", False))
-        self._config.setdefault("rc_url", "http://192.168.2.2:5572")
-        self._config.setdefault("source_remote", "Alist")
-        self._config.setdefault("destination_remote", "CloudDrive2")
+        self._config.setdefault("rc_url", "http://0.0.0.0:0")
+        self._config.setdefault("source_remote", "demo2")
+        self._config.setdefault("destination_remote", "demo")
         self._config.setdefault("source_path", "")
         self._config.setdefault("destination_path", "")
         self._config.setdefault("concurrency", 4)
@@ -106,9 +106,9 @@ class RcloneWebdavBackup(_PluginBase):
                 ],
             }
         ], {
-            "enabled": False, "rc_url": "http://192.168.2.2:5572",
-            "rc_user": "", "rc_password": "", "source_remote": "Alist",
-            "source_path": "", "destination_remote": "CloudDrive2",
+            "enabled": False, "rc_url": "http://0.0.0.0:0",
+            "rc_user": "", "rc_password": "", "source_remote": "demo2",
+            "source_path": "", "destination_remote": "demo",
             "destination_path": "", "concurrency": 4, "cron": "*/30 * * * *",
             "rc_timeout": 60, "onlyonce": False,
         }
@@ -237,7 +237,7 @@ class RcloneWebdavBackup(_PluginBase):
                 if size < 0:
                     continue
                 existing = conn.execute("""
-                    SELECT id, size, status FROM backup_tasks
+                    SELECT id, size, status, attempts FROM backup_tasks
                     WHERE plugin_id=? AND rel_path=? ORDER BY id
                 """, (self._plugin_id(), rel)).fetchall()
                 row = next((record for record in existing if record["size"] == size), None)
@@ -262,7 +262,7 @@ class RcloneWebdavBackup(_PluginBase):
                     """, (self._plugin_id(), rel, size, now, now))
                     inserted += cur.rowcount
                     row = conn.execute("""
-                        SELECT id, size, status FROM backup_tasks
+                        SELECT id, size, status, attempts FROM backup_tasks
                         WHERE id=? AND plugin_id=?
                     """, (cur.lastrowid, self._plugin_id())).fetchone()
                 else:
@@ -271,7 +271,7 @@ class RcloneWebdavBackup(_PluginBase):
                         WHERE plugin_id=? AND rel_path=? AND id!=?
                     """, (self._plugin_id(), rel, row["id"]))
                 row = conn.execute("""
-                    SELECT id, rel_path, size, status FROM backup_tasks
+                    SELECT id, rel_path, size, status, attempts FROM backup_tasks
                     WHERE id=? AND plugin_id=?
                 """, (row["id"], self._plugin_id())).fetchone()
                 if row["status"] == "success":
@@ -381,7 +381,7 @@ class RcloneWebdavBackup(_PluginBase):
         files.sort(key=lambda item: item["Path"])
         return files
 
-    def _copy_file(self, task: dict) -> None:
+    def _copy_file(self, task: dict, run_id: int | None = None) -> None:
         rel = self._clean_rel(task["rel_path"])
         source_root = self._remote_root(self._config.get("source_remote"), self._config.get("source_path", ""))
         destination_root = self._remote_root(self._config.get("destination_remote"), self._config.get("destination_path", ""))
@@ -396,6 +396,14 @@ class RcloneWebdavBackup(_PluginBase):
             "--retries=2", "--low-level-retries=5",
             "--stats=0", "--log-level=ERROR",
         ]
+        log_context = (
+            f"run={run_id or '-'} task={task['id']} path={rel!r} "
+            f"size={task['size']}B attempt={task.get('attempts', 0)}"
+        )
+        logger.info(
+            f"[RcloneWebdavBackup] {log_context} 开始 copy：{source_file} -> {destination_dir}"
+        )
+        copy_started = time.monotonic()
         result = self._rc("core/command", {
             "command": "copy",
             "arg": args,
@@ -408,6 +416,10 @@ class RcloneWebdavBackup(_PluginBase):
         job_id = result.get("jobid")
         if result.get("error"):
             raise RuntimeError(f"rclone copy 失败：{str(result['error'])[:300]}")
+        logger.info(
+            f"[RcloneWebdavBackup] {log_context} copy 已提交"
+            + (f"，jobid={job_id}" if job_id else "（同步返回）")
+        )
         if job_id:
             while not self._stop_event.is_set():
                 state = self._rc("job/status", {"jobid": job_id})
@@ -422,7 +434,13 @@ class RcloneWebdavBackup(_PluginBase):
                 time.sleep(1)
             else:
                 raise RuntimeError("插件停止，copy 任务未完成")
+        logger.info(
+            f"[RcloneWebdavBackup] {log_context} copy 完成，"
+            f"耗时 {time.monotonic() - copy_started:.1f}s"
+        )
 
+        stat_started = time.monotonic()
+        logger.info(f"[RcloneWebdavBackup] {log_context} 开始校验目标：{destination_root}/{rel}")
         stat = self._rc(
             "operations/stat",
             {"fs": destination_root, "remote": rel},
@@ -440,6 +458,10 @@ class RcloneWebdavBackup(_PluginBase):
             raise RuntimeError(
                 f"目标大小校验失败：源 {task['size']} 字节，目标 {int(target_size)} 字节"
             )
+        logger.info(
+            f"[RcloneWebdavBackup] {log_context} 目标校验通过："
+            f"{int(target_size)}B，耗时 {time.monotonic() - stat_started:.1f}s"
+        )
     # -------------------------- Worker --------------------------
 
     def _start_worker(self) -> bool:
@@ -460,6 +482,7 @@ class RcloneWebdavBackup(_PluginBase):
             return
         run_id = None
         started = self._now()
+        run_started = time.monotonic()
         summary = {"scanned": 0, "inserted": 0, "skipped": 0, "success": 0, "failed": 0}
         self._runtime_status = "running"
         self._last_summary = dict(summary)
@@ -471,26 +494,58 @@ class RcloneWebdavBackup(_PluginBase):
                 """, (self._plugin_id(), started))
                 run_id = cur.lastrowid
 
+            source = self._remote_root(
+                self._config.get("source_remote"), self._config.get("source_path", "")
+            )
+            destination = self._remote_root(
+                self._config.get("destination_remote"), self._config.get("destination_path", "")
+            )
+            workers = max(1, min(16, int(self._config.get("concurrency") or 4)))
+            logger.info(
+                f"[RcloneWebdavBackup] run={run_id} 开始备份："
+                f"{source} -> {destination}，并发={workers}"
+            )
             self._reset_interrupted()
+            logger.info(f"[RcloneWebdavBackup] run={run_id} 开始扫描源文件")
             files = self._list_source()
             scanned, inserted, skipped, pending = self._insert_scan(files)
             summary["scanned"], summary["inserted"] = scanned, inserted
             summary["skipped"] = skipped
             self._last_summary = dict(summary)
-
-            workers = max(1, min(16, int(self._config.get("concurrency") or 4)))
+            logger.info(
+                f"[RcloneWebdavBackup] run={run_id} 扫描完成："
+                f"发现={scanned} 新增或待处理={len(pending)} "
+                f"已成功跳过={skipped} 新建或变更={inserted}"
+            )
 
             def process_one(task: dict) -> tuple[bool, str]:
                 if self._stop_event.is_set():
+                    logger.warning(
+                        f"[RcloneWebdavBackup] run={run_id} task={task['id']} "
+                        f"path={task['rel_path']!r} 插件停止，未开始处理"
+                    )
                     return False, "插件停止"
+                task_started = time.monotonic()
+                task["attempts"] = task.get("attempts", 0) + 1
                 try:
-                    self._copy_file(task)
+                    self._copy_file(task, run_id)
                     self._set_task(task["id"], "success")
+                    logger.info(
+                        f"[RcloneWebdavBackup] run={run_id} task={task['id']} "
+                        f"path={task['rel_path']!r} size={task['size']}B "
+                        f"attempt={task['attempts']} 备份成功，"
+                        f"总耗时 {time.monotonic() - task_started:.1f}s"
+                    )
                     return True, ""
                 except Exception as err:
                     safe_error = f"{type(err).__name__}: {err}"
                     self._set_task(task["id"], "failed", safe_error)
-                    logger.error(f"[RcloneWebdavBackup] FAILED {task['rel_path']}: {safe_error}")
+                    logger.exception(
+                        f"[RcloneWebdavBackup] run={run_id} task={task['id']} "
+                        f"path={task['rel_path']!r} size={task['size']}B "
+                        f"attempt={task['attempts']} 备份失败，"
+                        f"耗时 {time.monotonic() - task_started:.1f}s：{safe_error}"
+                    )
                     return False, safe_error
 
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rclone-copy") as pool:
@@ -514,12 +569,27 @@ class RcloneWebdavBackup(_PluginBase):
                     ok, _ = done.result()
                     summary["success" if ok else "failed"] += 1
                     self._last_summary = dict(summary)
+                    completed = summary["success"] + summary["failed"]
+                    logger.info(
+                        f"[RcloneWebdavBackup] run={run_id} 进度 "
+                        f"{completed}/{len(pending)}：成功={summary['success']} "
+                        f"失败={summary['failed']} 跳过={summary['skipped']}"
+                    )
 
             self._runtime_status = "stopped" if self._stop_event.is_set() else "idle"
             message = "任务已停止" if self._stop_event.is_set() else "备份执行完成"
             run_status = "stopped" if self._stop_event.is_set() else "finished"
+            logger.info(
+                f"[RcloneWebdavBackup] run={run_id} {message}："
+                f"扫描={summary['scanned']} 跳过={summary['skipped']} "
+                f"成功={summary['success']} 失败={summary['failed']}，"
+                f"总耗时 {time.monotonic() - run_started:.1f}s"
+            )
         except Exception as err:
-            logger.exception(f"[RcloneWebdavBackup] 备份运行异常：{err}")
+            logger.exception(
+                f"[RcloneWebdavBackup] run={run_id or '-'} 备份运行异常："
+                f"{type(err).__name__}: {err}"
+            )
             message = str(err)
             run_status = "failed"
             self._runtime_status = "error"
