@@ -12,5 +12,18 @@
       "v1.0.0": "首次发布：SQLite 增量记录、RC copy、目标校验、并发和 Cron。"
     }
   },
-  "CloudDrive2Sync":{"author":"Hu","description":"基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 不走本地中转。","history":{"v0.1.0":"骨架版本: 生命周期/配置/页面/API/定时服务, 同步引擎, SQLite WAL 状态库, CD2 gRPC 客户端适配层。"},"icon":"CloudDrive2.png","labels":"网盘,同步,CloudDrive2","level":1,"name":"CloudDrive2 网盘增量同步","system_version":">=3.0.0","version":"0.1.0"}
+    "CloudDrive2Sync": {
+    "author": "Hu",
+    "description": "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。",
+    "history": {
+      "v0.2.0": "修复异步复制误判: CopyFile 提交后按 GetCopyTasks 状态跨轮校验, 不再立即复查判失败; 配置表单分组美化, 任务页面美化, 新增校验等待/超时和冲突策略配置。",
+      "v0.1.0": "骨架版本: 生命周期/配置/页面/API/定时服务, 同步引擎, SQLite WAL 状态库, CD2 gRPC 客户端适配层。"
+    },
+    "icon": "CloudDrive2.png",
+    "labels": "网盘,同步,CloudDrive2",
+    "level": 1,
+    "name": "CloudDrive2 网盘增量同步",
+    "system_version": ">=3.0.0",
+    "version": "0.2.0"
+  }
 }
