@@ -3,7 +3,7 @@
 MoviePilot V3 插件：CloudDrive2 网盘 A → B 增量同步。基于 CloudDrive2 gRPC API，
 复制由 CD2 服务端跨盘完成，不走本地中转，速度取决于 CD2 与网盘接口。
 
-## 当前状态：骨架 v0.1.0
+## 当前状态：v0.2.0
 
 已完成：
 - V3 生命周期：`init_plugin` / `get_state` / `stop_service`（可重复调用、释放连接）
@@ -18,7 +18,11 @@ MoviePilot V3 插件：CloudDrive2 网盘 A → B 增量同步。基于 CloudDri
 - 状态库：SQLite WAL，放在插件数据目录（`get_data_path()/clouddrive2sync.db`），
   不写源码目录
 - CD2 客户端：RPC 与字段已对官方 `clouddrive.proto`（v1.2.0-beta）核实
-  （GetSubFiles / CreateFolder / CopyFile / CloudDriveFile.fileHashes）
+  （GetSubFiles / CreateFolder / CopyFile / GetCopyTasks / CloudDriveFile.fileHashes）
+- 异步复制校验（v0.2.0）：CopyFile 返回成功只是任务已提交，目标文件不会立即
+  出现。完成判定改为看 GetCopyTasks 的 CopyTask 状态（Completed/Failed），
+  提交后本轮短轮询（默认 30 秒），未完成的留到后续轮次自动结算，
+  不误判失败、不重复提交；同步中超过默认 24 小时才判超时失败
 
 记录清理规则（design-v0.1.md 第 6 点）：
 - 同步状态是增量依据，源文件还在就不删；源端消失先标记 `source_gone`，
@@ -29,8 +33,8 @@ MoviePilot V3 插件：CloudDrive2 网盘 A → B 增量同步。基于 CloudDri
 
 - 在真实 MoviePilot V3 宿主里加载一次验证（导入路径、API 注册、服务清理）
 - 确认 `clouddrive2-client` 在宿主环境的 pb2 模块路径，必要时改 `_PB2_CANDIDATES`
-- CopyFile 是同步返回结果，没有任务进度接口：页面暂不显示百分比进度，
-  后续若要做截图那种进度条，需要再找 CD2 的传输任务 API
+- CopyTask 给的是整个复制任务（源→目标目录）的字节进度，不是单文件进度；
+  页面暂按文件粒度显示状态，不显示单文件百分比
 - 注册远程命令 `/cd2sync`（PluginAction 事件）
 - 需要实时面板时再把页面升级为 Vue 联邦组件（注意联邦 CSS 门禁）
 - 插件图标 `CloudDrive2.png` 需放入插件仓库图标目录

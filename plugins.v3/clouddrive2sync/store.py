@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     retry_count   INTEGER NOT NULL DEFAULT 0,
     first_seen_at REAL NOT NULL,
     last_seen_at  REAL NOT NULL,
+    submitted_at  REAL,
     finished_at   REAL,
     gone_at       REAL,
     last_error    TEXT
@@ -63,6 +64,17 @@ class SyncStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            # v0.1 的旧库没有 submitted_at 列, 补上 (可重复执行)
+            cols = [
+                r[1]
+                for r in self._conn.execute(
+                    "PRAGMA table_info(sync_state)"
+                ).fetchall()
+            ]
+            if "submitted_at" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE sync_state ADD COLUMN submitted_at REAL"
+                )
             self._conn.commit()
 
     def close(self):
@@ -97,6 +109,7 @@ class SyncStore:
                     status = 'done',
                     retry_count = 0,
                     last_seen_at = excluded.last_seen_at,
+                    submitted_at = NULL,
                     finished_at = excluded.finished_at,
                     gone_at = NULL,
                     last_error = NULL
@@ -105,6 +118,46 @@ class SyncStore:
                  target_path, now, now, now),
             )
             self._conn.commit()
+
+    def upsert_copying(self, *, state_key, source_path, source_file_id, size,
+                       check_value, target_path, now=None):
+        """记录已提交 CD2 异步复制、尚未校验完成的状态。
+
+        重复提交同一文件时保留最早的 submitted_at, 超时判断以它为准。
+        """
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO sync_state
+                    (state_key, source_path, source_file_id, size, check_value,
+                     target_path, status, retry_count, first_seen_at,
+                     last_seen_at, submitted_at, finished_at, gone_at, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, 'copying', 0, ?, ?, ?, NULL, NULL, NULL)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    source_path = excluded.source_path,
+                    size = excluded.size,
+                    check_value = excluded.check_value,
+                    target_path = excluded.target_path,
+                    status = 'copying',
+                    last_seen_at = excluded.last_seen_at,
+                    submitted_at = COALESCE(sync_state.submitted_at,
+                                            excluded.submitted_at),
+                    finished_at = NULL,
+                    gone_at = NULL,
+                    last_error = NULL
+                """,
+                (state_key, source_path, source_file_id, size, check_value,
+                 target_path, now, now, now),
+            )
+            self._conn.commit()
+
+    def list_states_by_status(self, status):
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM sync_state WHERE status = ?", (status,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def record_failure(self, *, state_key, source_path, source_file_id, size,
                        check_value, target_path, error, now=None):
@@ -142,7 +195,8 @@ class SyncStore:
         now = now if now is not None else time.time()
         with self._lock:
             rows = self._conn.execute(
-                "SELECT state_key FROM sync_state WHERE status != 'source_gone'"
+                "SELECT state_key FROM sync_state "
+                "WHERE status IN ('done', 'failed')"
             ).fetchall()
             missing = [r[0] for r in rows if r[0] not in seen_keys]
             for key in missing:
@@ -174,6 +228,17 @@ class SyncStore:
                 "UPDATE sync_task SET status = ?, error = ?, finished_at = ? "
                 "WHERE id = ?",
                 (status, error, now, task_id),
+            )
+            self._conn.commit()
+
+    def finish_open_task(self, source_path, status, error=None, now=None):
+        """把某个源文件还处于 syncing 的面板任务结掉 (跨轮校验完成时用)。"""
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sync_task SET status = ?, error = ?, finished_at = ? "
+                "WHERE source_path = ? AND status = 'syncing'",
+                (status, error, now, source_path),
             )
             self._conn.commit()
 

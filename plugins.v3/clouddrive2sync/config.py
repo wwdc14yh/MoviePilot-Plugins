@@ -12,10 +12,14 @@ _FIELDS = (
     "source_path",
     "target_path",
     "interval_minutes",
+    "conflict_policy",
+    "max_retries",
+    "verify_wait_seconds",
+    "verify_interval_seconds",
+    "pending_timeout_hours",
     "history_retention_days",
     "failed_retention_days",
     "state_tombstone_days",
-    "max_retries",
     "onlyonce",
 )
 
@@ -26,10 +30,14 @@ _DEFAULTS = {
     "source_path": "",
     "target_path": "",
     "interval_minutes": 30,
+    "conflict_policy": "skip",
+    "max_retries": 5,
+    "verify_wait_seconds": 30,
+    "verify_interval_seconds": 5,
+    "pending_timeout_hours": 24,
     "history_retention_days": 30,
     "failed_retention_days": 90,
     "state_tombstone_days": 30,
-    "max_retries": 5,
     "onlyonce": False,
 }
 
@@ -51,10 +59,14 @@ try:
         source_path: str = _DEFAULTS["source_path"]
         target_path: str = _DEFAULTS["target_path"]
         interval_minutes: int = _DEFAULTS["interval_minutes"]
+        conflict_policy: str = _DEFAULTS["conflict_policy"]
+        max_retries: int = _DEFAULTS["max_retries"]
+        verify_wait_seconds: int = _DEFAULTS["verify_wait_seconds"]
+        verify_interval_seconds: int = _DEFAULTS["verify_interval_seconds"]
+        pending_timeout_hours: int = _DEFAULTS["pending_timeout_hours"]
         history_retention_days: int = _DEFAULTS["history_retention_days"]
         failed_retention_days: int = _DEFAULTS["failed_retention_days"]
         state_tombstone_days: int = _DEFAULTS["state_tombstone_days"]
-        max_retries: int = _DEFAULTS["max_retries"]
         onlyonce: bool = _DEFAULTS["onlyonce"]
 
         @classmethod
@@ -77,10 +89,14 @@ except Exception:  # 无 pydantic 的环境 (本地测试) 用 dataclass
         source_path: str = _DEFAULTS["source_path"]
         target_path: str = _DEFAULTS["target_path"]
         interval_minutes: int = _DEFAULTS["interval_minutes"]
+        conflict_policy: str = _DEFAULTS["conflict_policy"]
+        max_retries: int = _DEFAULTS["max_retries"]
+        verify_wait_seconds: int = _DEFAULTS["verify_wait_seconds"]
+        verify_interval_seconds: int = _DEFAULTS["verify_interval_seconds"]
+        pending_timeout_hours: int = _DEFAULTS["pending_timeout_hours"]
         history_retention_days: int = _DEFAULTS["history_retention_days"]
         failed_retention_days: int = _DEFAULTS["failed_retention_days"]
         state_tombstone_days: int = _DEFAULTS["state_tombstone_days"]
-        max_retries: int = _DEFAULTS["max_retries"]
         onlyonce: bool = _DEFAULTS["onlyonce"]
 
         @classmethod

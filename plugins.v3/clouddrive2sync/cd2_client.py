@@ -8,6 +8,10 @@ RPC 和字段均已对着官方 clouddrive.proto (v1.2.0-beta) 核实:
   resultFilePaths}
 - CloudDriveFile{id, name, fullPathName, size, isDirectory, fileHashes}
   fileHashes 的 HashType: Unknown=0, Md5=1, Sha1=2, PikPakSha1=3
+- GetCopyTasks(Empty) -> GetCopyTaskResult{copyTasks}: CopyFile 是异步的,
+  返回 success 只代表任务已提交; 完成/失败看 CopyTask.status
+  (Pending=0, Scanning=1, Scanned=2, Completed=3, Failed=4),
+  进度看 uploadedBytes/totalBytes。
 
 生成的 pb2 存根不在本仓库: 运行时从以下模块路径依次尝试导入,
 都找不到时抛 Cd2DependencyError 并说明怎么生成/安装。
@@ -26,6 +30,16 @@ _PB2_CANDIDATES = (
 
 _CONFLICT_POLICIES = {"overwrite": 0, "rename": 1, "skip": 2}
 _HASH_PRIORITY = ((2, "sha1"), (1, "md5"), (3, "pikpak_sha1"))
+
+# CopyTask.TaskStatus (clouddrive.proto): 复制是异步任务, CopyFile 返回成功
+# 只代表任务已提交, 真正完成要看这里的状态变成 Completed。
+_COPY_TASK_STATUS = {
+    0: "Pending",
+    1: "Scanning",
+    2: "Scanned",
+    3: "Completed",
+    4: "Failed",
+}
 
 
 class Cd2Error(Exception):
@@ -47,6 +61,45 @@ class Cd2File:
     is_directory: bool = False
     check_value: str = ""
     extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class Cd2CopyTask:
+    """CD2 异步复制任务 (GetCopyTasks 返回的 CopyTask)。"""
+
+    source_path: str = ""
+    dest_path: str = ""
+    status: int = 0
+    task_mode: int = 0
+    total_files: int = 0
+    uploaded_files: int = 0
+    failed_files: int = 0
+    total_bytes: int = 0
+    uploaded_bytes: int = 0
+    paused: bool = False
+    errors: list = field(default_factory=list)
+    start_time: float = 0.0
+
+    @property
+    def status_name(self):
+        return _COPY_TASK_STATUS.get(int(self.status), "Unknown")
+
+    @property
+    def is_completed(self):
+        return self.status_name == "Completed"
+
+    @property
+    def is_failed(self):
+        return self.status_name == "Failed"
+
+    @property
+    def progress(self):
+        """0-100 的字节进度; 总量未知时返回 None。"""
+        if self.total_bytes:
+            return min(100, int(self.uploaded_bytes * 100 / self.total_bytes))
+        if self.total_files:
+            return min(100, int(self.uploaded_files * 100 / self.total_files))
+        return None
 
 
 def pick_check_value(file_hashes):
@@ -216,3 +269,60 @@ class Cd2GrpcClient:
                 "CopyFile 失败: " + str(getattr(reply, "errorMessage", "未知错误"))
             )
         return list(getattr(reply, "resultFilePaths", []) or [])
+
+    def get_copy_tasks(self):
+        """拉取 CD2 全部复制任务 (异步复制的完成状态以此为准)。
+
+        RPC: GetCopyTasks(google.protobuf.Empty) -> GetCopyTaskResult{copyTasks}
+        CopyTask 关键字段: sourcePath, destPath, status, totalBytes,
+        uploadedBytes, totalFiles, uploadedFiles, failedFiles, errors。
+        """
+        self._connect()
+        try:
+            from google.protobuf import empty_pb2
+
+            request = empty_pb2.Empty()
+        except Exception:
+            request = None
+        try:
+            if request is not None:
+                reply = self._stub.GetCopyTasks(
+                    request, metadata=self._metadata(), timeout=self.timeout
+                )
+            else:
+                reply = self._stub.GetCopyTasks(
+                    metadata=self._metadata(), timeout=self.timeout
+                )
+        except Exception as exc:
+            raise Cd2Error("GetCopyTasks 失败: " + str(exc)) from exc
+        tasks = []
+        for raw in getattr(reply, "copyTasks", []) or []:
+            errors = []
+            for err in getattr(raw, "errors", []) or []:
+                msg = getattr(err, "message", "") or str(err)
+                if msg:
+                    errors.append(str(msg))
+            start_ts = getattr(raw, "startTime", None)
+            start_time = 0.0
+            if start_ts is not None:
+                try:
+                    start_time = float(start_ts.ToDatetime().timestamp())
+                except Exception:
+                    start_time = float(getattr(start_ts, "seconds", 0) or 0)
+            tasks.append(
+                Cd2CopyTask(
+                    source_path=str(getattr(raw, "sourcePath", "") or ""),
+                    dest_path=str(getattr(raw, "destPath", "") or ""),
+                    status=int(getattr(raw, "status", 0) or 0),
+                    task_mode=int(getattr(raw, "taskMode", 0) or 0),
+                    total_files=int(getattr(raw, "totalFiles", 0) or 0),
+                    uploaded_files=int(getattr(raw, "uploadedFiles", 0) or 0),
+                    failed_files=int(getattr(raw, "failedFiles", 0) or 0),
+                    total_bytes=int(getattr(raw, "totalBytes", 0) or 0),
+                    uploaded_bytes=int(getattr(raw, "uploadedBytes", 0) or 0),
+                    paused=bool(getattr(raw, "paused", False)),
+                    errors=errors,
+                    start_time=start_time,
+                )
+            )
+        return tasks

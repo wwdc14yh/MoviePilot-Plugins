@@ -1,14 +1,14 @@
 """CloudDrive2Sync: CloudDrive2 网盘 A -> B 增量同步插件 (MoviePilot V3)。
 
-骨架版本 0.1.0:
-- 生命周期 / 配置表单 / 任务页面 / API / 定时服务已接好;
-- 同步逻辑在 sync_engine.py, 状态库在 store.py, CD2 客户端在 cd2_client.py;
-- 定时服务走宿主 get_service(), 不自建调度器;
-- 立即运行走宿主 add_plugin_once_job(), 宿主没有该接口时退回线程执行。
+v0.2.0:
+- CD2 CopyFile 是异步操作, 完成判定改为 GetCopyTasks 的 CopyTask 状态
+  + 跨轮校验, 不再在提交后立即复查 (必然失败);
+- 配置表单分组卡片化, 任务页面美化 (状态图标/概览卡片)。
 """
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -58,13 +58,19 @@ def _human_size(size):
     return "%d B" % (size or 0)
 
 
+def _human_time(ts):
+    if not ts:
+        return ""
+    return time.strftime("%m-%d %H:%M", time.localtime(float(ts)))
+
+
 class CloudDrive2Sync(_PluginBase):
     """CloudDrive2 网盘增量同步插件主类。"""
 
     plugin_name = "CloudDrive2 网盘增量同步"
-    plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 不走本地中转。"
+    plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.2.0"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -213,39 +219,210 @@ class CloudDrive2Sync(_PluginBase):
     # ---------- 配置表单 ----------
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
-        def text_field(model, label, **extra):
+        def switch(model, label, hint=""):
             props = {"model": model, "label": label}
-            props.update(extra)
+            if hint:
+                props["hint"] = hint
+            return {"component": "VSwitch", "props": props}
+
+        def text(model, label, hint="", placeholder="", type_=None):
+            props = {"model": model, "label": label}
+            if hint:
+                props["hint"] = hint
+            if placeholder:
+                props["placeholder"] = placeholder
+            if type_:
+                props["type"] = type_
             return {"component": "VTextField", "props": props}
+
+        def col(content, md=6):
+            return {
+                "component": "VCol",
+                "props": {"cols": 12, "md": md},
+                "content": [content],
+            }
+
+        def row(*cols):
+            return {"component": "VRow", "content": list(cols)}
+
+        def card(title, subtitle, *rows_):
+            return {
+                "component": "VCard",
+                "props": {"variant": "outlined", "class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "props": {"text": title}},
+                    {"component": "VCardSubtitle", "props": {"text": subtitle}},
+                    {"component": "VCardText", "content": list(rows_)},
+                ],
+            }
+
+        def alert(text_):
+            return {
+                "component": "VAlert",
+                "props": {"type": "info", "variant": "tonal", "text": text_},
+            }
 
         form = [
             {
                 "component": "VForm",
                 "content": [
-                    {"component": "VSwitch",
-                     "props": {"model": "enabled", "label": "启用插件"}},
-                    text_field("cd2_address", "CloudDrive2 gRPC 地址"),
-                    text_field("cd2_token", "CloudDrive2 API Token",
-                               type="password"),
-                    text_field("source_path", "源目录 (A 网盘)"),
-                    text_field("target_path", "目标目录 (B 网盘)"),
-                    text_field("interval_minutes", "轮询间隔 (分钟)",
-                               type="number"),
-                    text_field("history_retention_days", "成功历史保留 (天)",
-                               type="number"),
-                    text_field("failed_retention_days", "失败历史保留 (天)",
-                               type="number"),
-                    text_field("state_tombstone_days", "源端消失宽限 (天)",
-                               type="number"),
-                    text_field("max_retries", "失败最大重试次数", type="number"),
-                    {"component": "VSwitch",
-                     "props": {"model": "onlyonce", "label": "立即运行一次"}},
+                    card(
+                        "连接设置",
+                        "CloudDrive2 gRPC 服务与插件开关",
+                        row(
+                            col(switch("enabled", "启用插件"), md=6),
+                            col(switch("onlyonce", "保存后立即运行一次"), md=6),
+                        ),
+                        row(
+                            col(
+                                text(
+                                    "cd2_address",
+                                    "CloudDrive2 gRPC 地址",
+                                    hint="CD2 的 gRPC 监听地址, 默认端口 19798",
+                                    placeholder="127.0.0.1:19798",
+                                )
+                            ),
+                            col(
+                                text(
+                                    "cd2_token",
+                                    "API Token",
+                                    hint="在 CloudDrive2 设置中创建, 只给文件读写权限即可",
+                                    type_="password",
+                                )
+                            ),
+                        ),
+                    ),
+                    card(
+                        "同步路径",
+                        "从 A 网盘目录增量同步到 B 网盘目录, 保持相对目录结构",
+                        row(
+                            col(
+                                text(
+                                    "source_path",
+                                    "源目录 (A 网盘)",
+                                    hint="例如 /115/待同步",
+                                    placeholder="/网盘名/源目录",
+                                )
+                            ),
+                            col(
+                                text(
+                                    "target_path",
+                                    "目标目录 (B 网盘)",
+                                    hint="例如 /阿里云盘/已同步",
+                                    placeholder="/网盘名/目标目录",
+                                )
+                            ),
+                        ),
+                    ),
+                    card(
+                        "同步策略",
+                        "轮询与冲突处理",
+                        row(
+                            col(
+                                text(
+                                    "interval_minutes",
+                                    "轮询间隔 (分钟)",
+                                    hint="每隔多久扫描一次源目录并结算未完成的复制",
+                                    type_="number",
+                                )
+                            ),
+                            col(
+                                {
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "conflict_policy",
+                                        "label": "目标已存在同名文件时",
+                                        "hint": "传给 CD2 CopyFile 的冲突策略",
+                                        "items": [
+                                            {"title": "跳过 (Skip)",
+                                             "value": "skip"},
+                                            {"title": "覆盖 (Overwrite)",
+                                             "value": "overwrite"},
+                                            {"title": "重命名 (Rename)",
+                                             "value": "rename"},
+                                        ],
+                                    },
+                                }
+                            ),
+                        ),
+                        row(
+                            col(
+                                text(
+                                    "max_retries",
+                                    "失败最大重试次数",
+                                    hint="超过后暂缓, 文件有变化或人工介入后再试",
+                                    type_="number",
+                                ),
+                                md=6,
+                            )
+                        ),
+                    ),
+                    card(
+                        "异步校验与记录清理",
+                        "网盘复制是异步的: 提交成功不等于传完, 完成状态跨轮询确认",
+                        alert(
+                            "复制提交后先在本轮等待一小段时间确认, 没传完的会"
+                            "留在“同步中”, 后续每轮自动结算, 不会误判失败, "
+                            "也不会重复提交。"
+                        ),
+                        row(
+                            col(
+                                text(
+                                    "verify_wait_seconds",
+                                    "提交后本轮等待 (秒)",
+                                    hint="0 表示提交后不等待, 全部留到下一轮结算",
+                                    type_="number",
+                                )
+                            ),
+                            col(
+                                text(
+                                    "verify_interval_seconds",
+                                    "等待时轮询间隔 (秒)",
+                                    type_="number",
+                                )
+                            ),
+                        ),
+                        row(
+                            col(
+                                text(
+                                    "pending_timeout_hours",
+                                    "同步中超时判失败 (小时)",
+                                    hint="大文件跨盘慢时调大, 避免误判",
+                                    type_="number",
+                                )
+                            ),
+                            col(
+                                text(
+                                    "history_retention_days",
+                                    "成功历史保留 (天)",
+                                    type_="number",
+                                )
+                            ),
+                        ),
+                        row(
+                            col(
+                                text(
+                                    "failed_retention_days",
+                                    "失败历史保留 (天)",
+                                    type_="number",
+                                )
+                            ),
+                            col(
+                                text(
+                                    "state_tombstone_days",
+                                    "源文件消失后宽限 (天)",
+                                    hint="防改名/移动误判, 到期才删同步状态",
+                                    type_="number",
+                                )
+                            ),
+                        ),
+                    ),
                 ],
             }
         ]
         return form, SyncConfig().to_dict()
 
-    # ---------- 任务页面 (最小版, 对应截图的列表形态) ----------
+    # ---------- 任务页面 ----------
 
     def get_page(self) -> list[dict]:
         if self._store is None:
@@ -259,32 +436,78 @@ class CloudDrive2Sync(_PluginBase):
                     },
                 }
             ]
-        status_label = {
-            "syncing": "同步中",
-            "done": "完成",
-            "failed": "失败",
+        counts = self._store.count_states()
+        cfg = self._config
+        overview = (
+            "源目录 %s → 目标目录 %s · 已同步 %d · 同步中 %d · 失败 %d · "
+            "源端已消失 %d"
+            % (
+                (cfg.source_path if cfg else "") or "-",
+                (cfg.target_path if cfg else "") or "-",
+                counts.get("done", 0),
+                counts.get("copying", 0),
+                counts.get("failed", 0),
+                counts.get("source_gone", 0),
+            )
+        )
+        header = {
+            "component": "VCard",
+            "props": {"variant": "tonal", "class": "mb-4"},
+            "content": [
+                {"component": "VCardTitle",
+                 "props": {"text": "CloudDrive2 增量同步"}},
+                {"component": "VCardSubtitle", "props": {"text": overview}},
+            ],
+        }
+        status_meta = {
+            "syncing": ("同步中", "mdi-progress-clock"),
+            "done": ("完成", "mdi-check-circle"),
+            "failed": ("失败", "mdi-alert-circle"),
         }
         items = []
         for task in self._store.list_tasks(limit=50):
-            status = status_label.get(task["status"], task["status"])
-            subtitle = "%s · %s · %s" % (
-                status,
-                _human_size(task["size"]),
-                task["target_path"],
+            label, icon = status_meta.get(
+                task["status"], (task["status"], "mdi-file")
             )
+            parts = [
+                label,
+                _human_size(task["size"]),
+                _human_time(task.get("started_at")),
+                str(task["target_path"]),
+            ]
+            if task["status"] == "syncing":
+                elapsed = int(time.time() - float(task["started_at"]))
+                if elapsed >= 60:
+                    parts.append("已进行 %d 分钟" % (elapsed // 60))
             if task.get("error"):
-                subtitle += " · " + str(task["error"])
+                parts.append(str(task["error"]))
             items.append(
                 {
                     "component": "VListItem",
-                    "props": {"title": task["file_name"], "subtitle": subtitle},
+                    "props": {
+                        "title": task["file_name"],
+                        "subtitle": " · ".join(p for p in parts if p),
+                        "prepend-icon": icon,
+                    },
                 }
             )
         if not items:
             items.append(
                 {
                     "component": "VListItem",
-                    "props": {"title": "暂无同步任务", "subtitle": ""},
+                    "props": {
+                        "title": "暂无同步任务",
+                        "subtitle": "启用插件并等待一轮同步, 或在配置页勾选立即运行一次",
+                        "prepend-icon": "mdi-information",
+                    },
                 }
             )
-        return [{"component": "VList", "content": items}]
+        task_card = {
+            "component": "VCard",
+            "props": {"variant": "outlined"},
+            "content": [
+                {"component": "VCardTitle", "props": {"text": "同步任务"}},
+                {"component": "VList", "content": items},
+            ],
+        }
+        return [header, task_card]
