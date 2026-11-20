@@ -54,12 +54,12 @@ except Exception:  # pragma: no cover
 
 try:
     from .cd2_client import Cd2Error, Cd2GrpcClient
-    from .config import SyncConfig
+    from .config import SyncConfig, SyncTask
     from .store import SyncStore
     from .sync_engine import SyncEngine
 except ImportError:  # 直接以顶层模块加载时
     from cd2_client import Cd2Error, Cd2GrpcClient
-    from config import SyncConfig
+    from config import SyncConfig, SyncTask
     from store import SyncStore
     from sync_engine import SyncEngine
 
@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.4.0"
+    plugin_version = "0.4.1"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -301,6 +301,20 @@ class CloudDrive2Sync(_PluginBase):
                 "auth": "bear",
                 "summary": "删除目标端副本并排除该文件 (不再同步)",
             },
+            {
+                "path": "/save_task",
+                "endpoint": self.api_save_task,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "新建或更新一个任务 (直接落盘配置)",
+            },
+            {
+                "path": "/delete_task",
+                "endpoint": self.api_delete_task,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除一个任务 (直接落盘配置)",
+            },
         ]
 
     def api_run_once(self, task_id: str = None):
@@ -394,6 +408,55 @@ class CloudDrive2Sync(_PluginBase):
             except Cd2Error as exc:
                 return {"ok": False, "error": "删除目标文件失败: " + str(exc)}
         self._store.set_excluded(state_key)
+        return {"ok": True}
+
+    # ---------- 任务增删改 (总览页直接操作, 不绕配置页) ----------
+
+    def _persist_config(self):
+        """把当前配置落盘并重新初始化插件 (任务列表以此为准)。"""
+        saved = self._config.to_dict()
+        self.update_config(saved)
+        self.init_plugin(saved)
+
+    def api_save_task(self, task: dict = None, **kwargs):
+        """新建任务 (无 id 或 id 不存在) 或更新已有任务 (id 命中)。
+
+        前端字段可能以 JSON body 或查询参数两种方式到达, 统一收拢。
+        """
+        data = {}
+        if isinstance(task, dict):
+            data.update(task)
+        data.update({k: v for k, v in kwargs.items() if v is not None})
+        if self._config is None:
+            return {"ok": False, "error": "插件未初始化"}
+        new_task = SyncTask.from_dict(data)
+        if not new_task.source_path or not new_task.target_path:
+            return {"ok": False, "error": "源目录和目标目录必填"}
+        replaced = False
+        for idx, existing in enumerate(self._config.tasks):
+            if existing.id == new_task.id:
+                self._config.tasks[idx] = new_task
+                replaced = True
+                break
+        if not replaced:
+            # 新建: 强制生成新 id, 绝不复用已有任务的 id/状态
+            import uuid as _uuid
+
+            new_task.id = _uuid.uuid4().hex[:12]
+            self._config.tasks.append(new_task)
+        self._persist_config()
+        return {"ok": True, "task": new_task.to_dict(), "created": not replaced}
+
+    def api_delete_task(self, task_id: str = ""):
+        if self._config is None or not task_id:
+            return {"ok": False, "error": "参数缺失"}
+        before = len(self._config.tasks)
+        self._config.tasks = [
+            t for t in self._config.tasks if t.id != task_id
+        ]
+        if len(self._config.tasks) == before:
+            return {"ok": False, "error": "任务不存在"}
+        self._persist_config()
         return {"ok": True}
 
     # ---------- 配置表单 ----------

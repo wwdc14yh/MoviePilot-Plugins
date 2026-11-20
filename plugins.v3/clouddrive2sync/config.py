@@ -76,7 +76,11 @@ class SyncTask:
 
     @classmethod
     def from_dict(cls, data):
-        data = data or {}
+        data = dict(data or {})
+        for key in ("enabled", "delete_empty_dirs"):
+            value = data.get(key)
+            if isinstance(value, str):
+                data[key] = value.strip().lower() in ("true", "1", "yes", "on")
         task = cls(**{k: data[k] for k in _TASK_FIELDS if k in data})
         if not task.id:
             task.id = uuid.uuid4().hex[:12]
@@ -104,6 +108,12 @@ def _parse_tasks(raw, legacy):
         for item in raw:
             if isinstance(item, dict):
                 tasks.append(SyncTask.from_dict(item))
+    # id 去重: 重复 id 会让两个任务共用同一份同步状态, 后出现的重新生成
+    seen = set()
+    for task in tasks:
+        if task.id in seen:
+            task.id = uuid.uuid4().hex[:12]
+        seen.add(task.id)
     if not tasks:
         source = str(legacy.get("source_path") or "").strip()
         target = str(legacy.get("target_path") or "").strip()

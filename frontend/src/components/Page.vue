@@ -17,6 +17,86 @@ const loading = ref(false)
 const running = ref(false)
 const message = ref('')
 const confirm = ref({ show: false, item: null })
+const taskDialog = ref({ show: false, editing: null, form: null })
+const taskConfirmDelete = ref({ show: false })
+
+const modeItems = [
+  { title: '同步', value: 'sync' },
+  { title: '备份', value: 'backup' },
+  { title: '移动', value: 'move' },
+]
+const modeHints = {
+  sync: '增量复制；源变化重传，源消失按宽限期处理状态。',
+  backup: '只增不减；源变化时目标保留旧版、新版改名存入；源消失不动目标。',
+  move: '复制并校验完成后才删源文件；未完成绝不删源。可选清理源端空目录。',
+}
+const conflictItems = [
+  { title: '用全局默认', value: '' },
+  { title: '跳过 (Skip)', value: 'skip' },
+  { title: '覆盖 (Overwrite)', value: 'overwrite' },
+  { title: '重命名 (Rename)', value: 'rename' },
+]
+
+function blankTask() {
+  return {
+    id: '', name: '', enabled: true, mode: 'sync',
+    source_path: '', target_path: '', conflict_policy: '',
+    delete_empty_dirs: false,
+  }
+}
+function openNewTask() {
+  taskDialog.value = { show: true, editing: null, form: blankTask() }
+}
+function openEditTask() {
+  if (!selected.value) return
+  taskDialog.value = {
+    show: true,
+    editing: selected.value.id,
+    form: { ...blankTask(), ...JSON.parse(JSON.stringify(selected.value)) },
+  }
+}
+async function saveTask() {
+  const form = taskDialog.value.form
+  if (!form.source_path || !form.target_path) {
+    message.value = '源目录和目标目录必填'
+    return
+  }
+  try {
+    const res = unwrap(await props.api.post(
+      `plugin/${props.pluginId}/save_task`, { ...form },
+    ))
+    if (!res?.ok) {
+      message.value = '保存任务失败: ' + (res?.error || '')
+      return
+    }
+    taskDialog.value.show = false
+    message.value = res.created ? '新任务已创建' : '任务已更新'
+    await loadStatus()
+    if (res.task?.id) selectedId.value = res.task.id
+    await loadFiles()
+    emit('action')
+  } catch (e) {
+    message.value = '保存任务失败: ' + (e?.message || e)
+  }
+}
+async function deleteTask() {
+  taskConfirmDelete.value.show = false
+  if (!selected.value) return
+  try {
+    const res = unwrap(await props.api.post(
+      `plugin/${props.pluginId}/delete_task?task_id=${encodeURIComponent(selected.value.id)}`,
+    ))
+    if (!res?.ok) {
+      message.value = '删除任务失败: ' + (res?.error || '')
+      return
+    }
+    selectedId.value = ''
+    message.value = '任务已删除（已同步到目标端的文件不会被删）'
+    await load()
+  } catch (e) {
+    message.value = '删除任务失败: ' + (e?.message || e)
+  }
+}
 
 const modeMeta = {
   sync: { title: '同步', color: 'success', icon: 'mdi-sync' },
@@ -185,7 +265,7 @@ onMounted(load)
           </v-list>
           <v-card-actions>
             <v-btn block color="primary" variant="tonal" prepend-icon="mdi-plus"
-              @click="emit('switch')">新建任务</v-btn>
+              @click="openNewTask">新建任务</v-btn>
           </v-card-actions>
         </v-card>
       </v-col>
@@ -210,7 +290,9 @@ onMounted(load)
               :loading="running" @click="runOnce(selected.id)">运行此任务</v-btn>
             <v-btn variant="text" prepend-icon="mdi-play-circle-outline"
               :loading="running" @click="runOnce()">运行全部</v-btn>
-            <v-btn variant="text" prepend-icon="mdi-cog" @click="emit('switch')">任务配置</v-btn>
+            <v-btn variant="text" prepend-icon="mdi-pencil" @click="openEditTask">编辑任务</v-btn>
+            <v-btn variant="text" color="error" prepend-icon="mdi-delete"
+              @click="taskConfirmDelete.show = true">删除任务</v-btn>
           </div>
           <div class="text-body-2 text-medium-emphasis mb-4">
             {{ selected.source_path }} → {{ selected.target_path }}
@@ -325,6 +407,65 @@ onMounted(load)
         </v-alert>
       </v-col>
     </v-row>
+
+    <v-dialog v-model="taskDialog.show" max-width="640">
+      <v-card v-if="taskDialog.form">
+        <v-card-title>{{ taskDialog.editing ? '编辑任务' : '新建任务' }}</v-card-title>
+        <v-card-text>
+          <v-row>
+            <v-col cols="12" md="6">
+              <v-text-field v-model="taskDialog.form.name" label="任务名称"
+                placeholder="不填则用源目录" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-select v-model="taskDialog.form.mode" :items="modeItems" label="模式" />
+            </v-col>
+          </v-row>
+          <div class="text-caption text-medium-emphasis mb-3">
+            {{ modeHints[taskDialog.form.mode] }}
+          </div>
+          <v-text-field v-model="taskDialog.form.source_path" label="源目录 (A 网盘)"
+            placeholder="/网盘名/源目录" />
+          <v-text-field v-model="taskDialog.form.target_path" label="目标目录 (B 网盘)"
+            placeholder="/网盘名/目标目录" />
+          <v-row>
+            <v-col cols="12" md="6">
+              <v-select v-model="taskDialog.form.conflict_policy"
+                :items="conflictItems" label="目标同名文件冲突策略" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-switch v-model="taskDialog.form.enabled" label="启用任务"
+                color="primary" hide-details />
+              <v-switch v-if="taskDialog.form.mode === 'move'"
+                v-model="taskDialog.form.delete_empty_dirs" color="primary"
+                hide-details label="移动后清理源端空目录" />
+            </v-col>
+          </v-row>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="taskDialog.show = false">取消</v-btn>
+          <v-btn color="primary" @click="saveTask">
+            {{ taskDialog.editing ? '保存' : '创建任务' }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="taskConfirmDelete.show" max-width="480">
+      <v-card>
+        <v-card-title>删除任务</v-card-title>
+        <v-card-text>
+          确认删除任务「{{ selected?.name }}」？只删除任务配置和它的同步状态记录，
+          已经同步到目标端的文件不会被删除。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="taskConfirmDelete.show = false">取消</v-btn>
+          <v-btn color="error" @click="deleteTask">删除任务</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <v-dialog v-model="confirm.show" max-width="480">
       <v-card>

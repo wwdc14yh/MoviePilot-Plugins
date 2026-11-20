@@ -73,10 +73,15 @@ function removeTask(idx) {
 }
 function saveConfig() {
   const out = JSON.parse(JSON.stringify(config.value))
-  out.tasks = out.tasks.map(t => ({
-    ...t,
-    name: t.name || t.source_path || '未命名任务',
-  }))
+  const seen = new Set()
+  out.tasks = out.tasks.map(t => {
+    // id 缺失或重复时重新生成, 避免两个任务共用同一份同步状态
+    if (!t.id || seen.has(t.id)) {
+      t = { ...t, id: Math.random().toString(16).slice(2, 14) + Date.now().toString(16) }
+    }
+    seen.add(t.id)
+    return { ...t, name: t.name || t.source_path || '未命名任务' }
+  })
   emit('save', out)
 }
 </script>

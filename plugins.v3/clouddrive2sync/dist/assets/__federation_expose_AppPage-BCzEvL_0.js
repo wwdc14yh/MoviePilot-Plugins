@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-CdTLGLGK.js';
-import _sfc_main$1 from './__federation_expose_Page-CKuLrROY.js';
+import _sfc_main$1 from './__federation_expose_Page-cqQfEWYm.js';
 
 const {createVNode:_createVNode,openBlock:_openBlock,createElementBlock:_createElementBlock} = await importShared('vue');
 

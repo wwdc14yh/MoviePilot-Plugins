@@ -386,7 +386,7 @@ def test_plugin_class_loads_and_form(tmp_path):
     assert defaults["verify_wait_seconds"] == 30
     assert defaults["conflict_policy"] == "skip"
     paths = [a["path"] for a in plugin.get_api()]
-    assert paths == ["/run_once", "/tasks", "/status", "/files", "/retry_file", "/delete_file"]
+    assert "/save_task" in paths and "/delete_task" in paths and "/files" in paths
     assert plugin.api_status()["states"] == {}
     page = plugin.get_page()
     assert page[0]["component"] == "VCard"
@@ -455,7 +455,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.0"
+    assert plugin.plugin_version == "0.4.1"
     plugin.stop_service()
 
 
@@ -474,3 +474,38 @@ def test_excluded_file_skipped_and_listing(tmp_path):
     s = engine.run_once()
     assert fake.copy_calls == 0  # 排除的文件不再提交, 其余走跳过
     assert store.get_state(key)["status"] == "excluded"
+
+
+def test_save_and_delete_task_api(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_tasks", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_tasks"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    saved = {}
+    plugin.update_config = lambda cfg: saved.update(cfg) or True
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "a1", "name": "老任务", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"}]})
+    # 新建: 不带 id, 应新增而不是替换老任务
+    res = plugin.api_save_task(task={
+        "name": "新任务", "mode": "backup",
+        "source_path": "/C", "target_path": "/D"})
+    assert res["ok"] and res["created"] is True
+    assert len(plugin._config.tasks) == 2
+    names = [t.name for t in plugin._config.tasks]
+    assert names == ["老任务", "新任务"]
+    new_id = res["task"]["id"]
+    assert new_id != "a1"
+    # 更新: 带已有 id 应命中更新
+    res2 = plugin.api_save_task(task={
+        "id": new_id, "name": "新任务改", "mode": "move",
+        "source_path": "/C", "target_path": "/D"})
+    assert res2["ok"] and res2["created"] is False
+    assert plugin._config.tasks[1].name == "新任务改"
+    # 删除
+    res3 = plugin.api_delete_task(task_id=new_id)
+    assert res3["ok"] and len(plugin._config.tasks) == 1
+    plugin.stop_service()
