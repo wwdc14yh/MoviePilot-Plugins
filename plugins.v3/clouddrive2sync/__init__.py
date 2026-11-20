@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.2"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -108,7 +108,9 @@ class CloudDrive2Sync(_PluginBase):
         db_path = self.get_data_path() / "clouddrive2sync.db"
         self._store = SyncStore(db_path)
         self._client = Cd2GrpcClient(
-            self._config.cd2_address, token=self._config.cd2_token
+            self._config.cd2_address,
+            token=self._config.cd2_token,
+            copy_timeout=max(30, int(self._config.copy_timeout_seconds or 180)),
         )
         self._engine = SyncEngine(self._store, self._client, self._config,
                                   logger=logger)

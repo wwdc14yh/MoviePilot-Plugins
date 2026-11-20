@@ -123,7 +123,7 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card_title, null, {
-          default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
+          default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
             _createTextVNode("连接与全局设置", -1)
           ]))]),
           _: 1
@@ -236,7 +236,7 @@ return (_ctx, _cache) => {
       _: 1
     }),
     _createElementVNode("div", _hoisted_2, [
-      _cache[16] || (_cache[16] = _createElementVNode("span", { class: "text-h6" }, "任务列表", -1)),
+      _cache[17] || (_cache[17] = _createElementVNode("span", { class: "text-h6" }, "任务列表", -1)),
       _createVNode(_component_v_spacer),
       _createVNode(_component_v_btn, {
         color: "primary",
@@ -244,7 +244,7 @@ return (_ctx, _cache) => {
         "prepend-icon": "mdi-plus",
         onClick: addTask
       }, {
-        default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
+        default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
           _createTextVNode("新增任务", -1)
         ]))]),
         _: 1
@@ -255,7 +255,7 @@ return (_ctx, _cache) => {
       variant: "tonal",
       class: "mb-4"
     }, {
-      default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+      default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
         _createTextVNode(" 每个任务是一组独立的「源目录 → 目标目录」，有自己的模式和同步状态，互不影响。 复制是异步的：提交后先显示同步中，后续轮次自动结算，不会误判失败。 ", -1)
       ]))]),
       _: 1
@@ -400,7 +400,7 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card_title, null, {
-          default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+          default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
             _createTextVNode("异步校验与记录清理（全局）", -1)
           ]))]),
           _: 1
@@ -462,8 +462,25 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
+                      modelValue: config.value.copy_timeout_seconds,
+                      "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.value.copy_timeout_seconds) = $event)),
+                      modelModifiers: { number: true },
+                      type: "number",
+                      label: "提交复制超时 (秒)",
+                      hint: "跨盘提交慢时调大, 默认 180",
+                      "persistent-hint": ""
+                    }, null, 8, ["modelValue"])
+                  ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, {
+                  cols: "12",
+                  md: "4"
+                }, {
+                  default: _withCtx(() => [
+                    _createVNode(_component_v_text_field, {
                       modelValue: config.value.history_retention_days,
-                      "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.value.history_retention_days) = $event)),
+                      "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.value.history_retention_days) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "成功历史保留 (天)"
@@ -478,7 +495,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.failed_retention_days,
-                      "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.value.failed_retention_days) = $event)),
+                      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.value.failed_retention_days) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "失败历史保留 (天)"
@@ -493,7 +510,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.state_tombstone_days,
-                      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.value.state_tombstone_days) = $event)),
+                      "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.state_tombstone_days) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "源文件消失后宽限 (天)",
@@ -515,18 +532,18 @@ return (_ctx, _cache) => {
     _createElementVNode("div", _hoisted_4, [
       _createVNode(_component_v_btn, {
         variant: "text",
-        onClick: _cache[12] || (_cache[12] = $event => (emit('switch')))
+        onClick: _cache[13] || (_cache[13] = $event => (emit('switch')))
       }, {
-        default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+        default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
           _createTextVNode("查看任务", -1)
         ]))]),
         _: 1
       }),
       _createVNode(_component_v_btn, {
         variant: "text",
-        onClick: _cache[13] || (_cache[13] = $event => (emit('close')))
+        onClick: _cache[14] || (_cache[14] = $event => (emit('close')))
       }, {
-        default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+        default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
           _createTextVNode("关闭", -1)
         ]))]),
         _: 1
@@ -535,7 +552,7 @@ return (_ctx, _cache) => {
         color: "primary",
         onClick: saveConfig
       }, {
-        default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
+        default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
           _createTextVNode("保存", -1)
         ]))]),
         _: 1

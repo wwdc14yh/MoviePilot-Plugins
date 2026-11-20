@@ -45,6 +45,7 @@ class FakeCd2Client:
         self.copy_tasks = []
         self.deleted = []
         self.policies = []
+        self.deadline_sources = set()
 
     def delete_file(self, path):
         self.deleted.append(path)
@@ -117,6 +118,16 @@ class FakeCd2Client:
             if src_path in self.fail_sources:
                 raise Cd2Error("模拟复制失败")
             src = self.files[src_path]
+            if src_path in self.deadline_sources:
+                # 模拟服务端已接单但回复超时: 任务照常建, 客户端抛超时
+                self.copy_tasks.append(cd2_mod.Cd2CopyTask(
+                    source_path=src_path, dest_path=dest_path, status=0,
+                    total_bytes=src.size, uploaded_bytes=0,
+                    total_files=1, uploaded_files=0))
+                raise Cd2Error(
+                    "CopyFile 失败: <_InactiveRpcError status = "
+                    "StatusCode.DEADLINE_EXCEEDED details = Deadline Exceeded>"
+                )
             if self.async_mode:
                 self.copy_tasks.append(cd2_mod.Cd2CopyTask(
                     source_path=src_path, dest_path=dest_path, status=0,
@@ -455,7 +466,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.1"
+    assert plugin.plugin_version == "0.4.2"
     plugin.stop_service()
 
 
@@ -509,3 +520,20 @@ def test_save_and_delete_task_api(tmp_path):
     res3 = plugin.api_delete_task(task_id=new_id)
     assert res3["ok"] and len(plugin._config.tasks) == 1
     plugin.stop_service()
+
+
+def test_copy_submit_deadline_becomes_pending_not_failed(tmp_path):
+    """CopyFile 提交超时: 服务端可能已接单, 应转 copying 跨轮校验。"""
+    fake = FakeCd2Client()
+    seed(fake)
+    fake.deadline_sources = {
+        "/A/movie1.mkv", "/A/Season 1/ep1.mkv", "/A/Season 1/ep2.mkv"
+    }
+    engine, store = make_engine(tmp_path, fake)
+    s1 = engine.run_once()
+    assert s1.failed == 0 and s1.pending == 3
+    assert store.count_states().get("copying") == 3
+    fake.complete_tasks()
+    s2 = engine.run_once()
+    assert s2.verified == 3 and s2.failed == 0
+    assert fake.copy_calls == 3  # 没有重复提交

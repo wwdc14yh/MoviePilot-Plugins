@@ -396,6 +396,25 @@ class SyncEngine:
                     [src.full_path], target_dir, conflict_policy=policy
                 )
             except Exception as exc:
+                if "DEADLINE_EXCEEDED" in str(exc) or "Deadline Exceeded" in str(exc):
+                    # 提交超时不等于没提交: CD2 很可能已经建好任务在传了。
+                    # 记为 copying, 后续轮次按 CopyTask 状态结算,
+                    # 不记失败、不重复提交。
+                    self.store.upsert_copying(
+                        state_key=key,
+                        task_id=task.id,
+                        source_path=src.full_path,
+                        source_file_id=src.id,
+                        size=src.size,
+                        check_value=src.check_value,
+                        target_path=target_path,
+                    )
+                    tsum.pending += 1
+                    self._log(
+                        "提交复制超时 (任务可能已在 CD2 端创建, 转跨轮校验) "
+                        + src.full_path
+                    )
+                    continue
                 self.store.record_failure(
                     state_key=key,
                     task_id=task.id,

@@ -183,6 +183,10 @@ function saveConfig() {
               label="同步中超时判失败 (小时)" />
           </v-col>
           <v-col cols="12" md="4">
+            <v-text-field v-model.number="config.copy_timeout_seconds" type="number"
+              label="提交复制超时 (秒)" hint="跨盘提交慢时调大, 默认 180" persistent-hint />
+          </v-col>
+          <v-col cols="12" md="4">
             <v-text-field v-model.number="config.history_retention_days" type="number"
               label="成功历史保留 (天)" />
           </v-col>

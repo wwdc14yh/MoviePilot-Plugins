@@ -28,6 +28,7 @@ _GLOBAL_FIELDS = (
     "verify_wait_seconds",
     "verify_interval_seconds",
     "pending_timeout_hours",
+    "copy_timeout_seconds",
     "history_retention_days",
     "failed_retention_days",
     "state_tombstone_days",
@@ -43,6 +44,7 @@ _GLOBAL_DEFAULTS = {
     "verify_wait_seconds": 30,
     "verify_interval_seconds": 5,
     "pending_timeout_hours": 24,
+    "copy_timeout_seconds": 180,
     "history_retention_days": 30,
     "failed_retention_days": 90,
     "state_tombstone_days": 30,
@@ -144,6 +146,7 @@ class SyncConfig:
     verify_wait_seconds: int = _GLOBAL_DEFAULTS["verify_wait_seconds"]
     verify_interval_seconds: int = _GLOBAL_DEFAULTS["verify_interval_seconds"]
     pending_timeout_hours: int = _GLOBAL_DEFAULTS["pending_timeout_hours"]
+    copy_timeout_seconds: int = _GLOBAL_DEFAULTS["copy_timeout_seconds"]
     history_retention_days: int = _GLOBAL_DEFAULTS["history_retention_days"]
     failed_retention_days: int = _GLOBAL_DEFAULTS["failed_retention_days"]
     state_tombstone_days: int = _GLOBAL_DEFAULTS["state_tombstone_days"]

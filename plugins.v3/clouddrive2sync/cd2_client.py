@@ -132,10 +132,13 @@ def parent_and_name(path):
 class Cd2GrpcClient:
     """基于官方 proto 存根的真实客户端 (延迟连接)。"""
 
-    def __init__(self, address, token="", timeout=30):
+    def __init__(self, address, token="", timeout=60, copy_timeout=180):
         self.address = address
         self.token = token or ""
         self.timeout = timeout
+        # CopyFile 是服务端提交操作: 跨盘时 CD2 要建任务/谈秒传,
+        # 经常超过普通 RPC 的超时, 单独给长一点
+        self.copy_timeout = copy_timeout
         self._channel = None
         self._stub = None
         self._pb2 = None
@@ -260,7 +263,7 @@ class Cd2GrpcClient:
         )
         try:
             reply = self._stub.CopyFile(
-                request, metadata=self._metadata(), timeout=self.timeout
+                request, metadata=self._metadata(), timeout=self.copy_timeout
             )
         except Exception as exc:
             raise Cd2Error("CopyFile 失败: " + str(exc)) from exc
