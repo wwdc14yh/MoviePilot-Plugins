@@ -26,15 +26,20 @@ const taskDialog = ref({ show: false, editing: null, form: null })
 const taskConfirmDelete = ref({ show: false })
 const globalDialog = ref({ show: false, form: null })
 
-const modeItems = [
-  { title: '同步', value: 'sync' },
-  { title: '备份', value: 'backup' },
-  { title: '移动', value: 'move' },
-]
+const modeItems = computed(() => {
+  const items = [
+    { title: '增量同步', value: 'sync' },
+    { title: '移动', value: 'move' },
+  ]
+  if (taskDialog.value.form?.mode === 'backup') {
+    items.push({ title: '备份 (旧任务)', value: 'backup' })
+  }
+  return items
+})
 const modeHints = {
   sync: '增量复制；源变化重传，源消失按宽限期处理状态。',
   backup: '只增不减；源变化时目标保留旧版、新版改名存入；源消失不动目标。',
-  move: '复制并校验完成后才删源文件；未完成绝不删源。可选清理源端空目录。',
+  move: '复制任务完成确认后才删源文件；未完成绝不删源。可选清理源端空目录。',
 }
 const conflictItems = [
   { title: '用全局默认', value: '' },
@@ -69,8 +74,12 @@ async function saveTask() {
     return
   }
   try {
+    // 宿主把插件 API 注册为 FastAPI 路由: 只认查询参数,
+    // JSON body / dict 参数会被判为请求参数不正确, 故一律拼查询串
+    const params = new URLSearchParams()
+    for (const [k, v] of Object.entries(form)) params.set(k, String(v ?? ''))
     const res = unwrap(await props.api.post(
-      `plugin/${props.pluginId}/save_task`, { ...form },
+      `plugin/${props.pluginId}/save_task?${params.toString()}`,
     ))
     if (!res?.ok) {
       message.value = '保存任务失败: ' + (res?.error || '')
@@ -127,8 +136,12 @@ function openGlobal() {
 }
 async function saveGlobal() {
   try {
+    const params = new URLSearchParams()
+    for (const [k, v] of Object.entries(globalDialog.value.form)) {
+      params.set(k, String(v ?? ''))
+    }
     const res = unwrap(await props.api.post(
-      `plugin/${props.pluginId}/save_global`, { ...globalDialog.value.form },
+      `plugin/${props.pluginId}/save_global?${params.toString()}`,
     ))
     if (!res?.ok) {
       message.value = '保存全局设置失败: ' + (res?.error || '')
@@ -144,7 +157,7 @@ async function saveGlobal() {
 }
 
 const modeMeta = {
-  sync: { title: '同步', color: 'success', icon: 'mdi-sync' },
+  sync: { title: '增量同步', color: 'success', icon: 'mdi-sync' },
   backup: { title: '备份', color: 'info', icon: 'mdi-archive-arrow-down' },
   move: { title: '移动', color: 'warning', icon: 'mdi-file-move' },
 }
@@ -598,6 +611,7 @@ onMounted(load)
       <v-card v-if="taskDialog.form">
         <v-card-title>{{ taskDialog.editing ? '编辑任务' : '新建任务' }}</v-card-title>
         <v-card-text>
+          <div class="cd2-form-fields">
           <v-row>
             <v-col cols="12" md="6">
               <v-text-field v-model="taskDialog.form.name" label="任务名称"
@@ -627,6 +641,7 @@ onMounted(load)
                 hide-details label="移动后清理源端空目录" />
             </v-col>
           </v-row>
+          </div>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -717,8 +732,8 @@ onMounted(load)
   padding: 4px 8px;
 }
 .cd2-task-item {
-  padding: 10px;
-  margin-bottom: 6px;
+  padding: 12px;
+  margin-bottom: 10px;
   border-radius: 10px;
   border: 1px solid transparent;
   cursor: pointer;
@@ -772,6 +787,14 @@ onMounted(load)
 .cd2-table {
   min-width: 620px;
 }
+.cd2-table tbody td {
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+.cd2-table thead th {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
 .cd2-pager {
   display: flex;
   align-items: center;
@@ -782,6 +805,12 @@ onMounted(load)
 }
 .cd2-pagesize {
   max-width: 96px;
+}
+.cd2-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 6px;
 }
 
 /* 移动端: 上下堆叠, 左栏限高独立滚动, 统计卡两列, 表格横向滚动 */

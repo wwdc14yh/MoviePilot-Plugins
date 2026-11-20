@@ -139,6 +139,11 @@ class FakeCd2Client:
             self.files[target] = Cd2File(
                 id="copy-" + target, name=name, full_path=target,
                 size=src.size, is_directory=False, check_value=src.check_value)
+            # 同步模式下 CD2 任务瞬间完成, 任务列表里留一条 Completed
+            self.copy_tasks.append(cd2_mod.Cd2CopyTask(
+                source_path=src_path, dest_path=dest_path, status=3,
+                total_bytes=src.size, uploaded_bytes=src.size,
+                total_files=1, uploaded_files=1))
             result.append(target)
         return result
 
@@ -466,7 +471,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.3"
+    assert plugin.plugin_version == "0.4.5"
     plugin.stop_service()
 
 
@@ -501,9 +506,8 @@ def test_save_and_delete_task_api(tmp_path):
         {"id": "a1", "name": "老任务", "mode": "sync",
          "source_path": "/A", "target_path": "/B"}]})
     # 新建: 不带 id, 应新增而不是替换老任务
-    res = plugin.api_save_task(task={
-        "name": "新任务", "mode": "backup",
-        "source_path": "/C", "target_path": "/D"})
+    res = plugin.api_save_task(
+        name="新任务", mode="backup", source_path="/C", target_path="/D")
     assert res["ok"] and res["created"] is True
     assert len(plugin._config.tasks) == 2
     names = [t.name for t in plugin._config.tasks]
@@ -511,9 +515,9 @@ def test_save_and_delete_task_api(tmp_path):
     new_id = res["task"]["id"]
     assert new_id != "a1"
     # 更新: 带已有 id 应命中更新
-    res2 = plugin.api_save_task(task={
-        "id": new_id, "name": "新任务改", "mode": "move",
-        "source_path": "/C", "target_path": "/D"})
+    res2 = plugin.api_save_task(
+        id=new_id, name="新任务改", mode="move",
+        source_path="/C", target_path="/D")
     assert res2["ok"] and res2["created"] is False
     assert plugin._config.tasks[1].name == "新任务改"
     # 删除
@@ -579,3 +583,65 @@ def test_files_pagination_and_save_global(tmp_path):
     st = plugin.api_status()
     assert st["config"]["interval_minutes"] == 45
     plugin.stop_service()
+
+
+def test_target_moved_away_still_done_and_not_recopied(tmp_path):
+    """目标文件被 MoviePilot 整理移走后: 不判失败, 也不重复复制。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    engine.run_once()
+    fake.complete_tasks()
+    s2 = engine.run_once()
+    assert s2.verified == 3
+    # 模拟整理: 目标文件全部移走
+    for path in list(fake.files):
+        if path.startswith("/B/"):
+            del fake.files[path]
+    s3 = engine.run_once()
+    assert s3.skipped == 3 and s3.copied == 0 and s3.failed == 0
+    assert fake.copy_calls == 3  # 没有陷入 "复制->被移走->再复制" 循环
+
+
+def test_failed_recheck_fixed_by_completed_task(tmp_path):
+    """一轮结束后自动复检失败项: CD2 任务已完成的修正为已同步,
+    包括重试次数已耗尽的项目, 且不重新提交复制。"""
+    fake = FakeCd2Client()
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    task_id = engine.config.tasks[0].id
+    src = fake.files["/A/movie1.mkv"]
+    key = store_mod.state_key_of(task_id, src.id, "/A/movie1.mkv")
+    for _ in range(5):  # 失败到重试耗尽 (max_retries=5)
+        store.record_failure(
+            state_key=key, task_id=task_id, source_path="/A/movie1.mkv",
+            source_file_id=src.id, size=src.size,
+            check_value=src.check_value, target_path="/B/movie1.mkv",
+            error="CD2 任务已完成, 但目标文件缺失或校验不一致")
+    fake.copy_tasks.append(cd2_mod.Cd2CopyTask(
+        source_path="/A/movie1.mkv", dest_path="/B", status=3,
+        total_files=1, uploaded_files=1, failed_files=0))
+    summary = engine.run_once()
+    state = store.get_state(key)
+    assert state["status"] == "done"
+    assert summary.tasks[0]["verified"] >= 1
+    assert fake.copy_calls == 2  # 只有另外两个文件被正常复制
+
+
+def test_api_signatures_fastapi_safe(tmp_path):
+    """宿主把插件 API 注册为 FastAPI 路由: 端点签名里不能有
+    **kwargs 或 dict 参数, 否则真实宿主会返回 422 请求参数不正确。"""
+    import inspect
+
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_sig", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_sig"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    for api in plugin.get_api():
+        sig = inspect.signature(api["endpoint"])
+        for param in sig.parameters.values():
+            assert param.kind != inspect.Parameter.VAR_KEYWORD, api["path"]
+            assert param.annotation is not dict, api["path"]

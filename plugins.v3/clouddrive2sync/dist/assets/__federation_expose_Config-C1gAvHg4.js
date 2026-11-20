@@ -8,7 +8,7 @@ const _hoisted_2 = { class: "d-flex align-center mb-2" };
 const _hoisted_3 = { class: "text-caption text-medium-emphasis" };
 const _hoisted_4 = { class: "d-flex justify-end ga-2" };
 
-const {ref} = await importShared('vue');
+const {computed,ref} = await importShared('vue');
 
 
 
@@ -27,15 +27,20 @@ const _sfc_main = {
 const props = __props;
 const emit = __emit;
 
-const modeItems = [
-  { title: '同步', value: 'sync' },
-  { title: '备份', value: 'backup' },
-  { title: '移动', value: 'move' },
-];
+const modeItems = computed(() => {
+  const items = [
+    { title: '增量同步', value: 'sync' },
+    { title: '移动', value: 'move' },
+  ];
+  if ((config.value?.tasks || []).some(t => t.mode === 'backup')) {
+    items.push({ title: '备份 (旧任务)', value: 'backup' });
+  }
+  return items
+});
 const modeHints = {
   sync: '增量复制到目标；源文件变化会重新复制，源文件消失按宽限期清理同步状态（不动目标文件）。',
   backup: '只增不减：新文件复制过去，源文件变化时目标保留旧版、新版自动改名存入；源文件消失不处理目标。',
-  move: '复制并校验完成（哈希/大小一致）后才删除源文件；未传完绝不删源，删源失败下一轮重试。可选清理源端空目录。',
+  move: '复制任务在 CD2 端完成确认后才删除源文件；未完成绝不删源，删源失败下一轮重试。可选清理源端空目录。',
 };
 const conflictItems = [
   { title: '用全局默认', value: '' },
@@ -283,7 +288,7 @@ return (_ctx, _cache) => {
                 color: task.mode === 'move' ? 'warning' : task.mode === 'backup' ? 'info' : 'success'
               }, {
                 default: _withCtx(() => [
-                  _createTextVNode(_toDisplayString(modeItems.find(m => m.value === task.mode)?.title), 1)
+                  _createTextVNode(_toDisplayString(modeItems.value.find(m => m.value === task.mode)?.title), 1)
                 ]),
                 _: 2
               }, 1032, ["color"]),
@@ -317,9 +322,9 @@ return (_ctx, _cache) => {
                       _createVNode(_component_v_select, {
                         modelValue: task.mode,
                         "onUpdate:modelValue": $event => ((task.mode) = $event),
-                        items: modeItems,
+                        items: modeItems.value,
                         label: "模式"
-                      }, null, 8, ["modelValue", "onUpdate:modelValue"]),
+                      }, null, 8, ["modelValue", "onUpdate:modelValue", "items"]),
                       _createElementVNode("div", _hoisted_3, _toDisplayString(modeHints[task.mode]), 1)
                     ]),
                     _: 2

@@ -64,8 +64,9 @@ const _hoisted_36 = {
 };
 const _hoisted_37 = { class: "cd2-pager" };
 const _hoisted_38 = { class: "text-caption text-medium-emphasis" };
-const _hoisted_39 = { class: "text-caption text-medium-emphasis mb-3" };
-const _hoisted_40 = {
+const _hoisted_39 = { class: "cd2-form-fields" };
+const _hoisted_40 = { class: "text-caption text-medium-emphasis mb-3" };
+const _hoisted_41 = {
   key: 0,
   class: "mt-2 text-medium-emphasis"
 };
@@ -105,15 +106,20 @@ const taskDialog = ref({ show: false, editing: null, form: null });
 const taskConfirmDelete = ref({ show: false });
 const globalDialog = ref({ show: false, form: null });
 
-const modeItems = [
-  { title: '同步', value: 'sync' },
-  { title: '备份', value: 'backup' },
-  { title: '移动', value: 'move' },
-];
+const modeItems = computed(() => {
+  const items = [
+    { title: '增量同步', value: 'sync' },
+    { title: '移动', value: 'move' },
+  ];
+  if (taskDialog.value.form?.mode === 'backup') {
+    items.push({ title: '备份 (旧任务)', value: 'backup' });
+  }
+  return items
+});
 const modeHints = {
   sync: '增量复制；源变化重传，源消失按宽限期处理状态。',
   backup: '只增不减；源变化时目标保留旧版、新版改名存入；源消失不动目标。',
-  move: '复制并校验完成后才删源文件；未完成绝不删源。可选清理源端空目录。',
+  move: '复制任务完成确认后才删源文件；未完成绝不删源。可选清理源端空目录。',
 };
 const conflictItems = [
   { title: '用全局默认', value: '' },
@@ -148,8 +154,12 @@ async function saveTask() {
     return
   }
   try {
+    // 宿主把插件 API 注册为 FastAPI 路由: 只认查询参数,
+    // JSON body / dict 参数会被判为请求参数不正确, 故一律拼查询串
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(form)) params.set(k, String(v ?? ''));
     const res = unwrap(await props.api.post(
-      `plugin/${props.pluginId}/save_task`, { ...form },
+      `plugin/${props.pluginId}/save_task?${params.toString()}`,
     ));
     if (!res?.ok) {
       message.value = '保存任务失败: ' + (res?.error || '');
@@ -206,8 +216,12 @@ function openGlobal() {
 }
 async function saveGlobal() {
   try {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(globalDialog.value.form)) {
+      params.set(k, String(v ?? ''));
+    }
     const res = unwrap(await props.api.post(
-      `plugin/${props.pluginId}/save_global`, { ...globalDialog.value.form },
+      `plugin/${props.pluginId}/save_global?${params.toString()}`,
     ));
     if (!res?.ok) {
       message.value = '保存全局设置失败: ' + (res?.error || '');
@@ -223,7 +237,7 @@ async function saveGlobal() {
 }
 
 const modeMeta = {
-  sync: { title: '同步', color: 'success', icon: 'mdi-sync' },
+  sync: { title: '增量同步', color: 'success', icon: 'mdi-sync' },
   backup: { title: '备份', color: 'info', icon: 'mdi-archive-arrow-down' },
   move: { title: '移动', color: 'warning', icon: 'mdi-file-move' },
 };
@@ -1180,96 +1194,98 @@ return (_ctx, _cache) => {
                 }),
                 _createVNode(_component_v_card_text, null, {
                   default: _withCtx(() => [
-                    _createVNode(_component_v_row, null, {
-                      default: _withCtx(() => [
-                        _createVNode(_component_v_col, {
-                          cols: "12",
-                          md: "6"
-                        }, {
-                          default: _withCtx(() => [
-                            _createVNode(_component_v_text_field, {
-                              modelValue: taskDialog.value.form.name,
-                              "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((taskDialog.value.form.name) = $event)),
-                              label: "任务名称",
-                              placeholder: "不填则用源目录"
-                            }, null, 8, ["modelValue"])
-                          ]),
-                          _: 1
-                        }),
-                        _createVNode(_component_v_col, {
-                          cols: "12",
-                          md: "6"
-                        }, {
-                          default: _withCtx(() => [
-                            _createVNode(_component_v_select, {
-                              modelValue: taskDialog.value.form.mode,
-                              "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((taskDialog.value.form.mode) = $event)),
-                              items: modeItems,
-                              label: "模式"
-                            }, null, 8, ["modelValue"])
-                          ]),
-                          _: 1
-                        })
-                      ]),
-                      _: 1
-                    }),
-                    _createElementVNode("div", _hoisted_39, _toDisplayString(modeHints[taskDialog.value.form.mode]), 1),
-                    _createVNode(_component_v_text_field, {
-                      modelValue: taskDialog.value.form.source_path,
-                      "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((taskDialog.value.form.source_path) = $event)),
-                      label: "源目录 (A 网盘)",
-                      placeholder: "/网盘名/源目录"
-                    }, null, 8, ["modelValue"]),
-                    _createVNode(_component_v_text_field, {
-                      modelValue: taskDialog.value.form.target_path,
-                      "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((taskDialog.value.form.target_path) = $event)),
-                      label: "目标目录 (B 网盘)",
-                      placeholder: "/网盘名/目标目录"
-                    }, null, 8, ["modelValue"]),
-                    _createVNode(_component_v_row, null, {
-                      default: _withCtx(() => [
-                        _createVNode(_component_v_col, {
-                          cols: "12",
-                          md: "6"
-                        }, {
-                          default: _withCtx(() => [
-                            _createVNode(_component_v_select, {
-                              modelValue: taskDialog.value.form.conflict_policy,
-                              "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((taskDialog.value.form.conflict_policy) = $event)),
-                              items: conflictItems,
-                              label: "目标同名文件冲突策略"
-                            }, null, 8, ["modelValue"])
-                          ]),
-                          _: 1
-                        }),
-                        _createVNode(_component_v_col, {
-                          cols: "12",
-                          md: "6"
-                        }, {
-                          default: _withCtx(() => [
-                            _createVNode(_component_v_switch, {
-                              modelValue: taskDialog.value.form.enabled,
-                              "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((taskDialog.value.form.enabled) = $event)),
-                              label: "启用任务",
-                              color: "primary",
-                              "hide-details": ""
-                            }, null, 8, ["modelValue"]),
-                            (taskDialog.value.form.mode === 'move')
-                              ? (_openBlock(), _createBlock(_component_v_switch, {
-                                  key: 0,
-                                  modelValue: taskDialog.value.form.delete_empty_dirs,
-                                  "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((taskDialog.value.form.delete_empty_dirs) = $event)),
-                                  color: "primary",
-                                  "hide-details": "",
-                                  label: "移动后清理源端空目录"
-                                }, null, 8, ["modelValue"]))
-                              : _createCommentVNode("", true)
-                          ]),
-                          _: 1
-                        })
-                      ]),
-                      _: 1
-                    })
+                    _createElementVNode("div", _hoisted_39, [
+                      _createVNode(_component_v_row, null, {
+                        default: _withCtx(() => [
+                          _createVNode(_component_v_col, {
+                            cols: "12",
+                            md: "6"
+                          }, {
+                            default: _withCtx(() => [
+                              _createVNode(_component_v_text_field, {
+                                modelValue: taskDialog.value.form.name,
+                                "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((taskDialog.value.form.name) = $event)),
+                                label: "任务名称",
+                                placeholder: "不填则用源目录"
+                              }, null, 8, ["modelValue"])
+                            ]),
+                            _: 1
+                          }),
+                          _createVNode(_component_v_col, {
+                            cols: "12",
+                            md: "6"
+                          }, {
+                            default: _withCtx(() => [
+                              _createVNode(_component_v_select, {
+                                modelValue: taskDialog.value.form.mode,
+                                "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((taskDialog.value.form.mode) = $event)),
+                                items: modeItems.value,
+                                label: "模式"
+                              }, null, 8, ["modelValue", "items"])
+                            ]),
+                            _: 1
+                          })
+                        ]),
+                        _: 1
+                      }),
+                      _createElementVNode("div", _hoisted_40, _toDisplayString(modeHints[taskDialog.value.form.mode]), 1),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: taskDialog.value.form.source_path,
+                        "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((taskDialog.value.form.source_path) = $event)),
+                        label: "源目录 (A 网盘)",
+                        placeholder: "/网盘名/源目录"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: taskDialog.value.form.target_path,
+                        "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((taskDialog.value.form.target_path) = $event)),
+                        label: "目标目录 (B 网盘)",
+                        placeholder: "/网盘名/目标目录"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_row, null, {
+                        default: _withCtx(() => [
+                          _createVNode(_component_v_col, {
+                            cols: "12",
+                            md: "6"
+                          }, {
+                            default: _withCtx(() => [
+                              _createVNode(_component_v_select, {
+                                modelValue: taskDialog.value.form.conflict_policy,
+                                "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((taskDialog.value.form.conflict_policy) = $event)),
+                                items: conflictItems,
+                                label: "目标同名文件冲突策略"
+                              }, null, 8, ["modelValue"])
+                            ]),
+                            _: 1
+                          }),
+                          _createVNode(_component_v_col, {
+                            cols: "12",
+                            md: "6"
+                          }, {
+                            default: _withCtx(() => [
+                              _createVNode(_component_v_switch, {
+                                modelValue: taskDialog.value.form.enabled,
+                                "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((taskDialog.value.form.enabled) = $event)),
+                                label: "启用任务",
+                                color: "primary",
+                                "hide-details": ""
+                              }, null, 8, ["modelValue"]),
+                              (taskDialog.value.form.mode === 'move')
+                                ? (_openBlock(), _createBlock(_component_v_switch, {
+                                    key: 0,
+                                    modelValue: taskDialog.value.form.delete_empty_dirs,
+                                    "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((taskDialog.value.form.delete_empty_dirs) = $event)),
+                                    color: "primary",
+                                    "hide-details": "",
+                                    label: "移动后清理源端空目录"
+                                  }, null, 8, ["modelValue"]))
+                                : _createCommentVNode("", true)
+                            ]),
+                            _: 1
+                          })
+                        ]),
+                        _: 1
+                      })
+                    ])
                   ]),
                   _: 1
                 }),
@@ -1377,7 +1393,7 @@ return (_ctx, _cache) => {
                   _createTextVNode("的这份副本, 并把该文件标记为已排除, 此任务以后不再同步它。 源文件不会被删除。 ")
                 ], -1)),
                 (confirm.value.item?.status === 'failed')
-                  ? (_openBlock(), _createElementBlock("p", _hoisted_40, " 失败项目在目标端通常没有完整副本, 删除等于直接排除该文件。 "))
+                  ? (_openBlock(), _createElementBlock("p", _hoisted_41, " 失败项目在目标端通常没有完整副本, 删除等于直接排除该文件。 "))
                   : _createCommentVNode("", true)
               ]),
               _: 1
@@ -1417,6 +1433,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4cd486ff"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1da4f88e"]]);
 
 export { Page as default };

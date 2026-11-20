@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-CdTLGLGK.js';
-import Page from './__federation_expose_Page-v9kZrHnH.js';
+import Page from './__federation_expose_Page-DFoNoOzm.js';
 
 true&&(function polyfill() {
   const relList = document.createElement("link").relList;

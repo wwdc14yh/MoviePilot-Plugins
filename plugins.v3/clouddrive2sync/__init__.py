@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.4.3"
+    plugin_version = "0.4.5"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -434,15 +434,22 @@ class CloudDrive2Sync(_PluginBase):
         self.update_config(saved)
         self.init_plugin(saved)
 
-    def api_save_task(self, task: dict = None, **kwargs):
+    def api_save_task(self, id: str = "", name: str = "", enabled: bool = True,
+                      mode: str = "sync", source_path: str = "",
+                      target_path: str = "", conflict_policy: str = "",
+                      delete_empty_dirs: bool = False):
         """新建任务 (无 id 或 id 不存在) 或更新已有任务 (id 命中)。
 
-        前端字段可能以 JSON body 或查询参数两种方式到达, 统一收拢。
+        参数必须是显式标量: 宿主把插件 API 注册为 FastAPI 路由,
+        dict 参数和 **kwargs 都会被 FastAPI 判为参数不正确 (422)。
+        前端一律用查询参数提交, 与 run_once/delete_task 等接口一致。
         """
-        data = {}
-        if isinstance(task, dict):
-            data.update(task)
-        data.update({k: v for k, v in kwargs.items() if v is not None})
+        data = {
+            "id": id, "name": name, "enabled": enabled, "mode": mode,
+            "source_path": source_path, "target_path": target_path,
+            "conflict_policy": conflict_policy,
+            "delete_empty_dirs": delete_empty_dirs,
+        }
         if self._config is None:
             return {"ok": False, "error": "插件未初始化"}
         new_task = SyncTask.from_dict(data)
@@ -475,13 +482,36 @@ class CloudDrive2Sync(_PluginBase):
         self._persist_config()
         return {"ok": True}
 
-    def api_save_global(self, config: dict = None, **kwargs):
-        """保存全局设置: 只合并全局字段, 任务列表原样保留, 落盘后重初始化。
+    def api_save_global(self, enabled: bool = None, cd2_address: str = None,
+                        cd2_token: str = None, interval_minutes: int = None,
+                        max_retries: int = None,
+                        verify_wait_seconds: int = None,
+                        verify_interval_seconds: int = None,
+                        pending_timeout_hours: int = None,
+                        copy_timeout_seconds: int = None,
+                        history_retention_days: int = None,
+                        failed_retention_days: int = None,
+                        state_tombstone_days: int = None,
+                        onlyonce: bool = None):
+        """保存全局设置: 只合并传入的全局字段, 任务列表原样保留。
 
+        参数必须是显式标量 (原因同 api_save_task: FastAPI 校验)。
         让插件页面 (含侧边栏整页) 自带全局设置入口, 不依赖宿主跳转。
         """
-        payload = dict(config or {})
-        payload.update(kwargs)
+        payload = {
+            "enabled": enabled, "cd2_address": cd2_address,
+            "cd2_token": cd2_token, "interval_minutes": interval_minutes,
+            "max_retries": max_retries,
+            "verify_wait_seconds": verify_wait_seconds,
+            "verify_interval_seconds": verify_interval_seconds,
+            "pending_timeout_hours": pending_timeout_hours,
+            "copy_timeout_seconds": copy_timeout_seconds,
+            "history_retention_days": history_retention_days,
+            "failed_retention_days": failed_retention_days,
+            "state_tombstone_days": state_tombstone_days,
+            "onlyonce": onlyonce,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
         if self._config is None:
             self._config = SyncConfig.from_dict({})
         data = self._config.to_dict()

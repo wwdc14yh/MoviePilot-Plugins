@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps({
   initialConfig: { type: Object, default: () => ({}) },
@@ -10,15 +10,20 @@ const props = defineProps({
 })
 const emit = defineEmits(['save', 'close', 'switch'])
 
-const modeItems = [
-  { title: '同步', value: 'sync' },
-  { title: '备份', value: 'backup' },
-  { title: '移动', value: 'move' },
-]
+const modeItems = computed(() => {
+  const items = [
+    { title: '增量同步', value: 'sync' },
+    { title: '移动', value: 'move' },
+  ]
+  if ((config.value?.tasks || []).some(t => t.mode === 'backup')) {
+    items.push({ title: '备份 (旧任务)', value: 'backup' })
+  }
+  return items
+})
 const modeHints = {
   sync: '增量复制到目标；源文件变化会重新复制，源文件消失按宽限期清理同步状态（不动目标文件）。',
   backup: '只增不减：新文件复制过去，源文件变化时目标保留旧版、新版自动改名存入；源文件消失不处理目标。',
-  move: '复制并校验完成（哈希/大小一致）后才删除源文件；未传完绝不删源，删源失败下一轮重试。可选清理源端空目录。',
+  move: '复制任务在 CD2 端完成确认后才删除源文件；未完成绝不删源，删源失败下一轮重试。可选清理源端空目录。',
 }
 const conflictItems = [
   { title: '用全局默认', value: '' },

@@ -4,12 +4,13 @@
 - sync   同步: 增量复制; 源端变化重新复制; 源端消失标记 source_gone
 - backup 备份: 只增不减; 源文件变化时目标保留旧版 (强制 Rename 再复制一份),
          源端消失不处理目标, 也不标记 gone
-- move   移动: 复制 + 异步校验完成 + 目标校验通过后才 DeleteFile 删源,
+- move   移动: 复制 + CopyTask 完成确认后才 DeleteFile 删源,
          删除失败保留状态, 下一轮重试删源; 可选清理源端空目录
 
 CD2 的 CopyFile 是异步操作: 返回 success 只代表复制任务已提交,
-完成判定看 GetCopyTasks 的 CopyTask 状态 (Completed/Failed),
-Completed 后再 forceRefresh 目标目录做哈希/size 校验 (详见 v0.2.0 说明)。
+完成判定以官方 GetCopyTasks 的 CopyTask 状态为准 (Completed 且
+failedFiles=0 即成功)。不校验目标文件: 目标文件会被 MoviePilot
+整理功能移走, 缺失属正常现象, 据此判失败会误报并导致重复复制。
 """
 from __future__ import annotations
 
@@ -34,6 +35,11 @@ def _norm_root(path):
 
 def _join(root, rel):
     return root + "/" + rel if rel else root
+
+
+# CopyTask 在任务列表里查不到时的宽限: 超过后按已完成处理
+# (任务可能已被 CD2 清理; 目标文件也可能已被整理移走, 无法反查)
+_NO_TASK_GRACE_SECONDS = 1800
 
 
 @dataclass
@@ -182,32 +188,49 @@ class SyncEngine:
         return candidates[0][1]
 
     def _verify_state(self, state):
-        """返回 (outcome, detail): outcome in done / failed / pending。"""
+        """返回 (outcome, detail): outcome in done / failed / pending。
+
+        完成判定以 CD2 官方 CopyTask 状态为准: Completed 且
+        failedFiles=0 即成功, 不查目标文件 (目标会被 MoviePilot
+        整理移走, 缺失是正常现象)。
+        """
         source_path = state["source_path"]
         target_path = state["target_path"]
         target_dir, name = parent_and_name(target_path)
-        src = Cd2File(
-            id=str(state.get("source_file_id") or ""),
-            name=name,
-            full_path=source_path,
-            size=int(state.get("size") or 0),
-            check_value=str(state.get("check_value") or ""),
-        )
-        task = self._find_copy_task(self._copy_tasks(), source_path, target_dir)
+        tasks = self._copy_tasks()
+        task = self._find_copy_task(tasks, source_path, target_dir)
         if task is not None:
             if task.is_failed:
                 detail = "; ".join(task.errors) or "CD2 复制任务失败"
                 return "failed", detail
             if not task.is_completed:
                 return "pending", task.status_name
+            failed_files = int(getattr(task, "failed_files", 0) or 0)
+            if failed_files > 0:
+                detail = "; ".join(task.errors) or (
+                    "CD2 任务完成但有 %d 个文件失败" % failed_files
+                )
+                return "failed", detail
+            return "done", ""
+        if tasks is None:
+            # GetCopyTasks 不可用 (旧客户端) 才退回目标出现判断
+            src = Cd2File(
+                id=str(state.get("source_file_id") or ""),
+                name=name,
+                full_path=source_path,
+                size=int(state.get("size") or 0),
+                check_value=str(state.get("check_value") or ""),
+            )
             dst = self._target_listing(target_dir, force_refresh=True).get(name)
             if self._check_ok(src, dst):
                 return "done", ""
-            return "failed", "CD2 任务已完成, 但目标文件缺失或校验不一致"
-        dst = self._target_listing(target_dir, force_refresh=True).get(name)
-        if self._check_ok(src, dst):
-            return "done", ""
-        return "pending", "目标文件尚未出现"
+            return "pending", "目标文件尚未出现"
+        # 任务列表里查不到: 可能已被 CD2 清理。提交超过宽限期仍无记录,
+        # 按已完成处理 (提交当时已被服务端接受); 宽限期内继续等待。
+        submitted = state.get("submitted_at") or state.get("first_seen_at")
+        if submitted and time.time() - float(submitted) > _NO_TASK_GRACE_SECONDS:
+            return "done", "CD2 任务列表已无此任务, 按提交成功视为完成"
+        return "pending", "等待 CD2 复制任务出现"
 
     def _poll_verify(self, state):
         wait = max(0, int(self.config.verify_wait_seconds))
@@ -307,6 +330,39 @@ class SyncEngine:
             self._settled_keys.add(state["state_key"])
             self._log("异步复制失败 " + state["source_path"] + ": " + detail)
 
+    def _recheck_failed(self, task, tsum):
+        """一轮结束后自动复检失败项: 以 CopyTask 状态为准。
+
+        任务其实已完成 (Completed 且 failedFiles=0) 的, 把状态修正为
+        已同步 —— 典型是目标文件被 MoviePilot 整理移走后被旧逻辑
+        误判的失败, 以及重试次数已耗尽、本来不会再被处理的项目。
+        """
+        tasks = self._copy_tasks()
+        if tasks is None:
+            return
+        for state in self.store.list_states_by_status("failed",
+                                                      task_id=task.id):
+            target_dir, _ = parent_and_name(state["target_path"])
+            ct = self._find_copy_task(tasks, state["source_path"], target_dir)
+            if ct is None or not ct.is_completed:
+                continue
+            if int(getattr(ct, "failed_files", 0) or 0) > 0:
+                continue
+            self.store.upsert_done(
+                state_key=state["state_key"],
+                task_id=task.id,
+                source_path=state["source_path"],
+                source_file_id=state.get("source_file_id") or "",
+                size=int(state.get("size") or 0),
+                check_value=state.get("check_value") or "",
+                target_path=state["target_path"],
+            )
+            self.store.finish_open_task(state["source_path"], "done",
+                                        task_id=task.id)
+            tsum.verified += 1
+            self._log("失败项复检: CD2 任务已完成, 修正为已同步 "
+                      + state["source_path"])
+
     def _run_task(self, task):
         cfg = self.config
         tsum = TaskSummary(task_id=task.id, name=task.name, mode=task.mode)
@@ -354,18 +410,19 @@ class SyncEngine:
                 )
             )
             if unchanged:
-                dst = self._target_listing(target_dir).get(src.name)
-                if self._check_ok(src, dst):
-                    if task.mode == "move":
-                        # 目标早已就位但上次删源失败: 只补删源, 不重新复制
-                        state_like = dict(state)
-                        state_like["state_key"] = key
-                        if self._delete_source(task, state_like):
-                            tsum.moved += 1
-                        continue
-                    self.store.touch_seen(key)
-                    tsum.skipped += 1
+                # 已同步且源未变化: 直接跳过, 不查目标文件 ——
+                # 目标可能已被 MoviePilot 整理移走, 查不到不等于没同步,
+                # 据此重传会陷入 "复制 -> 被移走 -> 再复制" 的死循环。
+                if task.mode == "move":
+                    # 目标早已就位但上次删源失败: 只补删源, 不重新复制
+                    state_like = dict(state)
+                    state_like["state_key"] = key
+                    if self._delete_source(task, state_like):
+                        tsum.moved += 1
                     continue
+                self.store.touch_seen(key)
+                tsum.skipped += 1
+                continue
 
             if (
                 state
@@ -485,6 +542,8 @@ class SyncEngine:
             tsum.gone_marked = self.store.mark_missing_as_gone(
                 seen_keys, task_id=task.id
             )
+
+        self._recheck_failed(task, tsum)
 
         self._log(
             "任务[%s|%s]完成: 扫描 %d, 跳过 %d, 复制完成 %d, 跨轮校验 %d, "
