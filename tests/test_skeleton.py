@@ -482,7 +482,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.6"
+    assert plugin.plugin_version == "0.4.7"
     plugin.stop_service()
 
 
@@ -701,3 +701,22 @@ def test_concurrency_slot_refills_within_round(tmp_path):
     s = engine.run_once()
     assert s.copied == 3 and fake.copy_calls == 3
     assert store.count_states().get("done") == 3
+
+
+def test_settle_only_and_dest_fullpath_match(tmp_path):
+    """快速结算: 不跑整轮也能把同步中结算为已同步;
+    CD2 把 destPath 记成目标文件全路径时同样能匹配上。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    s1 = engine.run_once()
+    assert s1.pending == 3
+    # 第一个任务 (movie1) 的 dest 改成目标文件全路径的形态
+    fake.copy_tasks[0].dest_path = "/B/movie1.mkv"
+    fake.complete_tasks()
+    res = engine.settle_only()
+    assert fake.copy_calls == 3  # 没有重新提交
+    assert store.count_states().get("done") == 3
+    total_verified = sum(v["verified"] for v in res.values())
+    assert total_verified == 3

@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.4.6"
+    plugin_version = "0.4.7"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -324,7 +324,26 @@ class CloudDrive2Sync(_PluginBase):
                 "auth": "bear",
                 "summary": "保存全局设置 (直接落盘配置)",
             },
+            {
+                "path": "/settle",
+                "endpoint": self.api_settle,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "快速结算 (只按 CopyTask 状态更新同步中/失败项, 不跑整轮)",
+            },
         ]
+
+    def api_settle(self):
+        """快速结算: 页面打开/刷新时调用, 让状态及时跟上 CD2。"""
+        if self._engine is None:
+            return {"ok": False, "error": "插件未启用"}
+        import time as _time
+
+        now = _time.time()
+        if now - getattr(self, "_last_settle_ts", 0) < 5:
+            return {"ok": True, "skipped": "throttled"}
+        self._last_settle_ts = now
+        return {"ok": True, "settled": self._engine.settle_only()}
 
     def api_run_once(self, task_id: str = None):
         return self.run_sync(task_id=task_id or None)

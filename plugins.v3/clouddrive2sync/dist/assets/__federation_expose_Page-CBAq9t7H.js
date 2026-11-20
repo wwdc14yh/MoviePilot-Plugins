@@ -71,7 +71,7 @@ const _hoisted_41 = {
   class: "mt-2 text-medium-emphasis"
 };
 
-const {computed,onMounted,ref,watch} = await importShared('vue');
+const {computed,onMounted,onUnmounted,ref,watch} = await importShared('vue');
 
 
 
@@ -310,10 +310,18 @@ async function loadHistory() {
     `plugin/${props.pluginId}/tasks?task_id=${encodeURIComponent(selectedId.value)}&limit=5`,
   )) || [];
 }
+async function settle() {
+  // 先让后端按 CD2 任务状态快速结算一次, 页面状态才能及时更新,
+  // 不必等下一轮定时同步
+  try {
+    await props.api.post(`plugin/${props.pluginId}/settle`);
+  } catch (e) { /* 结算失败不阻塞页面加载 */ }
+}
 async function load() {
   if (!props.api || !props.pluginId) return
   loading.value = true;
   try {
+    await settle();
     await loadStatus();
     await Promise.all([loadFiles(), loadHistory()]);
   } catch (e) {
@@ -321,6 +329,13 @@ async function load() {
   } finally {
     loading.value = false;
   }
+}
+async function refreshQuiet() {
+  try {
+    await settle();
+    await loadStatus();
+    await Promise.all([loadFiles(), loadHistory()]);
+  } catch (e) { /* 自动刷新失败保持沉默 */ }
 }
 
 async function runOnce(taskId) {
@@ -374,7 +389,16 @@ watch(selectedId, () => { page.value = 1; loadFiles(); loadHistory(); });
 watch(filter, () => { page.value = 1; loadFiles(); });
 watch(page, loadFiles);
 watch(pageSize, () => { page.value = 1; loadFiles(); });
-onMounted(load);
+
+let autoTimer = null;
+onMounted(() => {
+  load();
+  // 页面打开期间每 20 秒自动结算并刷新, 状态跟得上 CD2 的完成进度
+  autoTimer = setInterval(refreshQuiet, 20000);
+});
+onUnmounted(() => {
+  if (autoTimer) clearInterval(autoTimer);
+});
 
 return (_ctx, _cache) => {
   const _component_v_icon = _resolveComponent("v-icon");
@@ -1453,6 +1477,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3b7d179c"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5db9c0d0"]]);
 
 export { Page as default };
