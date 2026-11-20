@@ -60,6 +60,7 @@ _TASK_FIELDS = (
     "target_path",
     "conflict_policy",
     "delete_empty_dirs",
+    "max_concurrent_sync",
 )
 
 
@@ -75,6 +76,7 @@ class SyncTask:
     target_path: str = ""
     conflict_policy: str = ""  # 空 = 用全局; sync/backup/move 各有默认处理
     delete_empty_dirs: bool = False  # 仅 move 模式: 删源文件后清理空目录
+    max_concurrent_sync: int = 1  # 每轮最多同时进行的文件同步数 (本任务独立)
 
     @classmethod
     def from_dict(cls, data):
@@ -84,6 +86,12 @@ class SyncTask:
             if isinstance(value, str):
                 data[key] = value.strip().lower() in ("true", "1", "yes", "on")
         task = cls(**{k: data[k] for k in _TASK_FIELDS if k in data})
+        try:
+            task.max_concurrent_sync = int(task.max_concurrent_sync or 1)
+        except (TypeError, ValueError):
+            task.max_concurrent_sync = 1
+        if task.max_concurrent_sync < 1:
+            task.max_concurrent_sync = 1
         if not task.id:
             task.id = uuid.uuid4().hex[:12]
         if task.mode not in TASK_MODES:

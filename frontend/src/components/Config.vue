@@ -42,6 +42,7 @@ function newTask() {
     target_path: '',
     conflict_policy: '',
     delete_empty_dirs: false,
+    max_concurrent_sync: 1,
   }
 }
 
@@ -162,6 +163,10 @@ function saveConfig() {
           <v-col cols="12" md="4">
             <v-select v-model="task.conflict_policy" :items="conflictItems"
               label="目标同名文件冲突策略" />
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-text-field v-model.number="task.max_concurrent_sync" type="number"
+              min="1" label="同步线程" hint="每轮最多同时进行的文件数" persistent-hint />
           </v-col>
           <v-col v-if="task.mode === 'move'" cols="12" md="4">
             <v-switch v-model="task.delete_empty_dirs" color="primary" hide-details

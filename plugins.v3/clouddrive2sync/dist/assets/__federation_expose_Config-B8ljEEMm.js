@@ -59,6 +59,7 @@ function newTask() {
     target_path: '',
     conflict_policy: '',
     delete_empty_dirs: false,
+    max_concurrent_sync: 1,
   }
 }
 
@@ -367,6 +368,24 @@ return (_ctx, _cache) => {
                         "onUpdate:modelValue": $event => ((task.conflict_policy) = $event),
                         items: conflictItems,
                         label: "目标同名文件冲突策略"
+                      }, null, 8, ["modelValue", "onUpdate:modelValue"])
+                    ]),
+                    _: 2
+                  }, 1024),
+                  _createVNode(_component_v_col, {
+                    cols: "12",
+                    md: "4"
+                  }, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_text_field, {
+                        modelValue: task.max_concurrent_sync,
+                        "onUpdate:modelValue": $event => ((task.max_concurrent_sync) = $event),
+                        modelModifiers: { number: true },
+                        type: "number",
+                        min: "1",
+                        label: "同步线程",
+                        hint: "每轮最多同时进行的文件数",
+                        "persistent-hint": ""
                       }, null, 8, ["modelValue", "onUpdate:modelValue"])
                     ]),
                     _: 2

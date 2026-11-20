@@ -232,15 +232,141 @@ class SyncEngine:
             return "done", "CD2 任务列表已无此任务, 按提交成功视为完成"
         return "pending", "等待 CD2 复制任务出现"
 
-    def _poll_verify(self, state):
+    def _poll_submitted(self, task, tsum, submitted):
+        """本轮刚提交的文件统一等一小段时间集中结算 (秒传的当场完成,
+        没完成的留 copying 跨轮结算)。submitted 是 [(row_id, state)]。
+        """
+        if not submitted:
+            return
         wait = max(0, int(self.config.verify_wait_seconds))
         interval = max(1, int(self.config.verify_interval_seconds))
         deadline = time.time() + wait
-        while True:
-            outcome, detail = self._verify_state(state)
-            if outcome != "pending" or time.time() >= deadline:
-                return outcome, detail
+        remaining = list(submitted)
+        while remaining:
+            nxt = []
+            for row_id, st in remaining:
+                outcome, detail = self._verify_state(st)
+                if outcome == "done":
+                    self.store.upsert_done(
+                        state_key=st["state_key"],
+                        task_id=task.id,
+                        source_path=st["source_path"],
+                        source_file_id=st["source_file_id"],
+                        size=st["size"],
+                        check_value=st["check_value"],
+                        target_path=st["target_path"],
+                    )
+                    self.store.finish_task(row_id, "done")
+                    tsum.copied += 1
+                    if task.mode == "move":
+                        if self._delete_source(task, st):
+                            tsum.moved += 1
+                elif outcome == "failed":
+                    self.store.record_failure(
+                        state_key=st["state_key"],
+                        task_id=task.id,
+                        source_path=st["source_path"],
+                        source_file_id=st["source_file_id"],
+                        size=st["size"],
+                        check_value=st["check_value"],
+                        target_path=st["target_path"],
+                        error=detail,
+                    )
+                    self.store.finish_task(row_id, "failed", error=detail)
+                    tsum.failed += 1
+                    self._log("异步复制失败 " + st["source_path"] + ": " + detail)
+                else:
+                    nxt.append((row_id, st))
+            remaining = nxt
+            if not remaining or time.time() >= deadline:
+                break
             time.sleep(min(interval, max(0.0, deadline - time.time())))
+        tsum.pending += len(remaining)
+        return len(remaining)
+
+    def _submit_one(self, task, tsum, cand):
+        """提交一个文件的复制。成功/超时返回 (row_id, state), 失败返回
+        (row_id, None) 并已记失败。"""
+        src = cand["src"]
+        key = cand["key"]
+        target_path = cand["target_path"]
+        row_id = self.store.begin_task(
+            file_name=src.name,
+            source_path=src.full_path,
+            target_path=target_path,
+            size=src.size,
+            task_id=task.id,
+        )
+        state_like = {
+            "state_key": key,
+            "source_path": src.full_path,
+            "target_path": target_path,
+            "source_file_id": src.id,
+            "size": src.size,
+            "check_value": src.check_value,
+        }
+        try:
+            self._ensure_dir(cand["target_dir"])
+            self.client.copy_file(
+                [src.full_path], cand["target_dir"],
+                conflict_policy=cand["policy"],
+            )
+        except Exception as exc:
+            if "DEADLINE_EXCEEDED" in str(exc) or "Deadline Exceeded" in str(exc):
+                # 提交超时不等于没提交: CD2 很可能已经建好任务在传了。
+                # 记为 copying, 后续按 CopyTask 状态结算, 不记失败。
+                self.store.upsert_copying(
+                    state_key=key, task_id=task.id,
+                    source_path=src.full_path, source_file_id=src.id,
+                    size=src.size, check_value=src.check_value,
+                    target_path=target_path,
+                )
+                self._log("提交复制超时 (任务可能已在 CD2 端创建, 转跨轮校验) "
+                          + src.full_path)
+                return row_id, state_like
+            self.store.record_failure(
+                state_key=key, task_id=task.id,
+                source_path=src.full_path, source_file_id=src.id,
+                size=src.size, check_value=src.check_value,
+                target_path=target_path, error=str(exc),
+            )
+            self.store.finish_task(row_id, "failed", error=str(exc))
+            tsum.failed += 1
+            self._log("提交复制失败 " + src.full_path + ": " + str(exc))
+            return row_id, None
+        self.store.upsert_copying(
+            state_key=key, task_id=task.id,
+            source_path=src.full_path, source_file_id=src.id,
+            size=src.size, check_value=src.check_value,
+            target_path=target_path,
+        )
+        return row_id, state_like
+
+    def _submit_candidates(self, task, tsum, candidates, in_flight, limit):
+        """按并发上限分批提交: 任一时刻在传文件数不超过 limit。
+
+        一批里有文件在等待窗口内完成 (如秒传) 就腾出名额继续下一批;
+        全部卡住时停止, 没提交的文件计暂缓, 下一轮继续。
+        """
+        idx = 0
+        total = len(candidates)
+        while idx < total:
+            batch = []
+            while idx < total and in_flight < limit:
+                cand = candidates[idx]
+                idx += 1
+                row_id, state_like = self._submit_one(task, tsum, cand)
+                if state_like is not None:
+                    batch.append((row_id, state_like))
+                    in_flight += 1
+            if not batch:
+                break
+            pending_left = self._poll_submitted(task, tsum, batch)
+            resolved = len(batch) - pending_left
+            in_flight -= resolved
+            if resolved == 0:
+                break
+        tsum.deferred += (total - idx)
 
     # ---------- 移动模式: 校验后删源 ----------
 
@@ -376,6 +502,11 @@ class SyncEngine:
 
         self._settle_copying(task, tsum)
 
+        # 本任务并发上限: 还在同步中的 + 本轮新提交的, 不超过这个数
+        limit = max(1, int(getattr(task, "max_concurrent_sync", 1) or 1))
+        in_flight = int(self.store.count_states(task.id).get("copying", 0))
+        candidates = []
+
         files = self._walk_source(source_root)
         tsum.scanned = len(files)
         seen_keys = set()
@@ -440,102 +571,12 @@ class SyncEngine:
             if task.mode == "backup" and state and state.get("status") == "done":
                 policy = "rename"
 
-            row_id = self.store.begin_task(
-                file_name=src.name,
-                source_path=src.full_path,
-                target_path=target_path,
-                size=src.size,
-                task_id=task.id,
-            )
-            try:
-                self._ensure_dir(target_dir)
-                self.client.copy_file(
-                    [src.full_path], target_dir, conflict_policy=policy
-                )
-            except Exception as exc:
-                if "DEADLINE_EXCEEDED" in str(exc) or "Deadline Exceeded" in str(exc):
-                    # 提交超时不等于没提交: CD2 很可能已经建好任务在传了。
-                    # 记为 copying, 后续轮次按 CopyTask 状态结算,
-                    # 不记失败、不重复提交。
-                    self.store.upsert_copying(
-                        state_key=key,
-                        task_id=task.id,
-                        source_path=src.full_path,
-                        source_file_id=src.id,
-                        size=src.size,
-                        check_value=src.check_value,
-                        target_path=target_path,
-                    )
-                    tsum.pending += 1
-                    self._log(
-                        "提交复制超时 (任务可能已在 CD2 端创建, 转跨轮校验) "
-                        + src.full_path
-                    )
-                    continue
-                self.store.record_failure(
-                    state_key=key,
-                    task_id=task.id,
-                    source_path=src.full_path,
-                    source_file_id=src.id,
-                    size=src.size,
-                    check_value=src.check_value,
-                    target_path=target_path,
-                    error=str(exc),
-                )
-                self.store.finish_task(row_id, "failed", error=str(exc))
-                tsum.failed += 1
-                self._log("提交复制失败 " + src.full_path + ": " + str(exc))
-                continue
+            candidates.append({
+                "src": src, "key": key, "target_path": target_path,
+                "target_dir": target_dir, "policy": policy,
+            })
 
-            state_like = {
-                "state_key": key,
-                "source_path": src.full_path,
-                "target_path": target_path,
-                "source_file_id": src.id,
-                "size": src.size,
-                "check_value": src.check_value,
-            }
-            outcome, detail = self._poll_verify(state_like)
-            if outcome == "done":
-                self.store.upsert_done(
-                    state_key=key,
-                    task_id=task.id,
-                    source_path=src.full_path,
-                    source_file_id=src.id,
-                    size=src.size,
-                    check_value=src.check_value,
-                    target_path=target_path,
-                )
-                self.store.finish_task(row_id, "done")
-                tsum.copied += 1
-                if task.mode == "move":
-                    if self._delete_source(task, state_like):
-                        tsum.moved += 1
-            elif outcome == "failed":
-                self.store.record_failure(
-                    state_key=key,
-                    task_id=task.id,
-                    source_path=src.full_path,
-                    source_file_id=src.id,
-                    size=src.size,
-                    check_value=src.check_value,
-                    target_path=target_path,
-                    error=detail,
-                )
-                self.store.finish_task(row_id, "failed", error=detail)
-                tsum.failed += 1
-                self._log("异步复制失败 " + src.full_path + ": " + detail)
-            else:
-                self.store.upsert_copying(
-                    state_key=key,
-                    task_id=task.id,
-                    source_path=src.full_path,
-                    source_file_id=src.id,
-                    size=src.size,
-                    check_value=src.check_value,
-                    target_path=target_path,
-                )
-                tsum.pending += 1
+        self._submit_candidates(task, tsum, candidates, in_flight, limit)
 
         if task.mode != "backup":
             # 备份模式只增不减: 源端消失不标记 gone

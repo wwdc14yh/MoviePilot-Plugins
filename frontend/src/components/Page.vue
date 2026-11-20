@@ -53,7 +53,7 @@ function blankTask() {
   return {
     id: '', name: '', enabled: true, mode: 'sync',
     source_path: '', target_path: '', conflict_policy: '',
-    delete_empty_dirs: false,
+    delete_empty_dirs: false, max_concurrent_sync: 1,
   }
 }
 function openNewTask() {
@@ -437,6 +437,7 @@ onMounted(load)
                   <div class="cd2-kv">
                     <span>模式</span><b>{{ modeMeta[selected.mode]?.title }}</b>
                     <span>冲突策略</span><b>{{ conflictTitles[selected.conflict_policy || ''] }}</b>
+                    <span>同步线程</span><b>每轮最多同时 {{ selected.max_concurrent_sync || 1 }} 个文件</b>
                     <span>源目录</span><b class="cd2-path">{{ selected.source_path }}</b>
                     <span>目标目录</span><b class="cd2-path">{{ selected.target_path }}</b>
                     <span v-if="selected.mode === 'move'">删源后清理空目录</span>
@@ -629,11 +630,16 @@ onMounted(load)
           <v-text-field v-model="taskDialog.form.target_path" label="目标目录 (B 网盘)"
             placeholder="/网盘名/目标目录" />
           <v-row>
-            <v-col cols="12" md="6">
+            <v-col cols="12" md="4">
               <v-select v-model="taskDialog.form.conflict_policy"
                 :items="conflictItems" label="目标同名文件冲突策略" />
             </v-col>
-            <v-col cols="12" md="6">
+            <v-col cols="12" md="4">
+              <v-text-field v-model.number="taskDialog.form.max_concurrent_sync"
+                type="number" min="1" label="同步线程"
+                hint="每轮最多同时进行的文件数" persistent-hint />
+            </v-col>
+            <v-col cols="12" md="4">
               <v-switch v-model="taskDialog.form.enabled" label="启用任务"
                 color="primary" hide-details />
               <v-switch v-if="taskDialog.form.mode === 'move'"

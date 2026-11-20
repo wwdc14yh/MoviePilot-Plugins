@@ -157,6 +157,9 @@ def make_engine(tmp_path, fake, **overrides):
     }
     cfg_data.update(overrides)
     cfg = SyncConfig.from_dict(cfg_data)
+    # 老测试默认不限并发 (新字段的真实默认是 1, 并发行为有专门测试覆盖)
+    for t in cfg.tasks:
+        t.max_concurrent_sync = 99
     store = SyncStore(Path(tmp_path) / "test.db")
     return SyncEngine(store, fake, cfg), store
 
@@ -293,6 +296,8 @@ def test_multi_task_isolation(tmp_path):
         ],
     })
     store = SyncStore(Path(tmp_path) / "test.db")
+    for t in cfg.tasks:
+        t.max_concurrent_sync = 99
     engine = SyncEngine(store, fake, cfg)
     s = engine.run_once()
     assert s.failed == 0 and len(s.tasks) == 2
@@ -314,6 +319,8 @@ def test_move_mode_deletes_source_after_verify(tmp_path):
                    "delete_empty_dirs": True}],
     })
     store = SyncStore(Path(tmp_path) / "test.db")
+    for t in cfg.tasks:
+        t.max_concurrent_sync = 99
     engine = SyncEngine(store, fake, cfg)
     s = engine.run_once()
     assert s.copied == 3 and s.moved == 3 and s.failed == 0
@@ -336,6 +343,8 @@ def test_move_mode_async_pending_keeps_source(tmp_path):
                    "source_path": "/A", "target_path": "/B"}],
     })
     store = SyncStore(Path(tmp_path) / "test.db")
+    for t in cfg.tasks:
+        t.max_concurrent_sync = 99
     engine = SyncEngine(store, fake, cfg)
     s1 = engine.run_once()
     assert s1.pending == 3 and s1.moved == 0
@@ -355,6 +364,8 @@ def test_backup_mode_rename_on_change_and_no_gone(tmp_path):
                    "source_path": "/A", "target_path": "/B"}],
     })
     store = SyncStore(Path(tmp_path) / "test.db")
+    for t in cfg.tasks:
+        t.max_concurrent_sync = 99
     engine = SyncEngine(store, fake, cfg)
     engine.run_once()
     # 源文件变化: 备份模式应以 rename 策略复制新版, 保留旧版
@@ -471,7 +482,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.5"
+    assert plugin.plugin_version == "0.4.6"
     plugin.stop_service()
 
 
@@ -507,13 +518,15 @@ def test_save_and_delete_task_api(tmp_path):
          "source_path": "/A", "target_path": "/B"}]})
     # 新建: 不带 id, 应新增而不是替换老任务
     res = plugin.api_save_task(
-        name="新任务", mode="backup", source_path="/C", target_path="/D")
+        name="新任务", mode="backup", source_path="/C", target_path="/D",
+        max_concurrent_sync=3)
     assert res["ok"] and res["created"] is True
     assert len(plugin._config.tasks) == 2
     names = [t.name for t in plugin._config.tasks]
     assert names == ["老任务", "新任务"]
     new_id = res["task"]["id"]
     assert new_id != "a1"
+    assert res["task"]["max_concurrent_sync"] == 3
     # 更新: 带已有 id 应命中更新
     res2 = plugin.api_save_task(
         id=new_id, name="新任务改", mode="move",
@@ -645,3 +658,46 @@ def test_api_signatures_fastapi_safe(tmp_path):
         for param in sig.parameters.values():
             assert param.kind != inspect.Parameter.VAR_KEYWORD, api["path"]
             assert param.annotation is not dict, api["path"]
+
+
+def test_per_task_concurrency_limit(tmp_path):
+    """每任务并发上限: 默认每轮只同时进行 N 个文件, 完成一个才补一个。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    engine.config.tasks[0].max_concurrent_sync = 1
+
+    s1 = engine.run_once()
+    assert s1.pending == 1 and fake.copy_calls == 1
+    fake.complete_tasks()
+    s2 = engine.run_once()
+    assert s2.verified == 1 and s2.pending == 1 and fake.copy_calls == 2
+    fake.complete_tasks()
+    s3 = engine.run_once()
+    assert s3.verified == 1 and s3.pending == 1 and fake.copy_calls == 3
+    fake.complete_tasks()
+    s4 = engine.run_once()
+    assert s4.verified == 1 and s4.pending == 0
+    assert store.count_states().get("done") == 3
+
+    # 上限为 2 时, 第一轮同时进行 2 个
+    fake2 = FakeCd2Client()
+    fake2.async_mode = True
+    seed(fake2)
+    engine2, _ = make_engine(tmp_path, fake2, verify_wait_seconds=0)
+    engine2.config.tasks[0].max_concurrent_sync = 2
+    s = engine2.run_once()
+    assert s.pending == 2 and fake2.copy_calls == 2
+
+
+def test_concurrency_slot_refills_within_round(tmp_path):
+    """上限 1 但文件秒传完成时: 名额当轮腾出, 一轮内依次传完所有文件,
+    而不是一个文件等一轮。"""
+    fake = FakeCd2Client()  # 同步模式: 提交即完成
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    engine.config.tasks[0].max_concurrent_sync = 1
+    s = engine.run_once()
+    assert s.copied == 3 and fake.copy_calls == 3
+    assert store.count_states().get("done") == 3
