@@ -270,6 +270,25 @@ class Cd2GrpcClient:
             )
         return list(getattr(reply, "resultFilePaths", []) or [])
 
+    def delete_file(self, path):
+        """删除单个文件/空目录 (移动模式校验完成后删源用)。
+
+        RPC: DeleteFile(FileRequest{path}) -> FileOperationResult
+        普通删除 (进回收站/可恢复), 不用 DeleteFilePermanently。
+        """
+        self._connect()
+        request = self._pb2.FileRequest(path=path)
+        try:
+            reply = self._stub.DeleteFile(
+                request, metadata=self._metadata(), timeout=self.timeout
+            )
+        except Exception as exc:
+            raise Cd2Error("DeleteFile 失败: " + str(exc)) from exc
+        if not getattr(reply, "success", False):
+            raise Cd2Error(
+                "DeleteFile 失败: " + str(getattr(reply, "errorMessage", "未知错误"))
+            )
+
     def get_copy_tasks(self):
         """拉取 CD2 全部复制任务 (异步复制的完成状态以此为准)。
 

@@ -15,6 +15,7 @@ from pathlib import Path
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sync_state (
     state_key     TEXT PRIMARY KEY,
+    task_id       TEXT NOT NULL DEFAULT '',
     source_path   TEXT NOT NULL,
     source_file_id TEXT,
     size          INTEGER NOT NULL DEFAULT 0,
@@ -33,6 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_state_status ON sync_state(status);
 
 CREATE TABLE IF NOT EXISTS sync_task (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL DEFAULT '',
     file_name     TEXT NOT NULL,
     source_path   TEXT NOT NULL,
     target_path   TEXT NOT NULL,
@@ -46,9 +48,13 @@ CREATE INDEX IF NOT EXISTS idx_sync_task_started ON sync_task(started_at);
 """
 
 
-def state_key_of(source_file_id, source_path):
-    """增量唯一键: 优先 CD2 文件 ID, 没有 ID 时退回路径。"""
-    return source_file_id if source_file_id else "path:" + source_path
+def state_key_of(task_id, source_file_id, source_path):
+    """增量唯一键: 任务内唯一 = task_id + (CD2 文件 ID, 没有时退回路径)。
+
+    多任务下同一文件可以被不同任务各同步一份, 状态互不干扰。
+    """
+    base = source_file_id if source_file_id else "path:" + source_path
+    return "%s|%s" % (task_id or "", base)
 
 
 class SyncStore:
@@ -64,17 +70,23 @@ class SyncStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
-            # v0.1 的旧库没有 submitted_at 列, 补上 (可重复执行)
-            cols = [
-                r[1]
-                for r in self._conn.execute(
-                    "PRAGMA table_info(sync_state)"
-                ).fetchall()
-            ]
-            if "submitted_at" not in cols:
-                self._conn.execute(
-                    "ALTER TABLE sync_state ADD COLUMN submitted_at REAL"
-                )
+            # 旧库补列 (可重复执行): v0.1 无 submitted_at, v0.2 无 task_id
+            for table, column, ddl in (
+                ("sync_state", "submitted_at",
+                 "ALTER TABLE sync_state ADD COLUMN submitted_at REAL"),
+                ("sync_state", "task_id",
+                 "ALTER TABLE sync_state ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"),
+                ("sync_task", "task_id",
+                 "ALTER TABLE sync_task ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"),
+            ):
+                cols = [
+                    r[1]
+                    for r in self._conn.execute(
+                        "PRAGMA table_info(%s)" % table
+                    ).fetchall()
+                ]
+                if column not in cols:
+                    self._conn.execute(ddl)
             self._conn.commit()
 
     def close(self):
@@ -91,16 +103,17 @@ class SyncStore:
         return dict(row) if row else None
 
     def upsert_done(self, *, state_key, source_path, source_file_id, size,
-                    check_value, target_path, now=None):
+                    check_value, target_path, task_id="", now=None):
         now = now if now is not None else time.time()
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO sync_state
-                    (state_key, source_path, source_file_id, size, check_value,
-                     target_path, status, retry_count, first_seen_at,
-                     last_seen_at, finished_at, gone_at, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, 'done', 0, ?, ?, ?, NULL, NULL)
+                    (state_key, task_id, source_path, source_file_id, size,
+                     check_value, target_path, status, retry_count,
+                     first_seen_at, last_seen_at, finished_at, gone_at,
+                     last_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'done', 0, ?, ?, ?, NULL, NULL)
                 ON CONFLICT(state_key) DO UPDATE SET
                     source_path = excluded.source_path,
                     size = excluded.size,
@@ -114,13 +127,13 @@ class SyncStore:
                     gone_at = NULL,
                     last_error = NULL
                 """,
-                (state_key, source_path, source_file_id, size, check_value,
-                 target_path, now, now, now),
+                (state_key, task_id, source_path, source_file_id, size,
+                 check_value, target_path, now, now, now),
             )
             self._conn.commit()
 
     def upsert_copying(self, *, state_key, source_path, source_file_id, size,
-                       check_value, target_path, now=None):
+                       check_value, target_path, task_id="", now=None):
         """记录已提交 CD2 异步复制、尚未校验完成的状态。
 
         重复提交同一文件时保留最早的 submitted_at, 超时判断以它为准。
@@ -130,10 +143,11 @@ class SyncStore:
             self._conn.execute(
                 """
                 INSERT INTO sync_state
-                    (state_key, source_path, source_file_id, size, check_value,
-                     target_path, status, retry_count, first_seen_at,
-                     last_seen_at, submitted_at, finished_at, gone_at, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, 'copying', 0, ?, ?, ?, NULL, NULL, NULL)
+                    (state_key, task_id, source_path, source_file_id, size,
+                     check_value, target_path, status, retry_count,
+                     first_seen_at, last_seen_at, submitted_at, finished_at,
+                     gone_at, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'copying', 0, ?, ?, ?, NULL, NULL, NULL)
                 ON CONFLICT(state_key) DO UPDATE SET
                     source_path = excluded.source_path,
                     size = excluded.size,
@@ -147,37 +161,95 @@ class SyncStore:
                     gone_at = NULL,
                     last_error = NULL
                 """,
-                (state_key, source_path, source_file_id, size, check_value,
-                 target_path, now, now, now),
+                (state_key, task_id, source_path, source_file_id, size,
+                 check_value, target_path, now, now, now),
             )
             self._conn.commit()
 
-    def list_states_by_status(self, status):
+    def list_states_by_status(self, status, task_id=None):
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM sync_state WHERE status = ?", (status,)
-            ).fetchall()
+            if task_id is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM sync_state WHERE status = ?", (status,)
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM sync_state WHERE status = ? AND task_id = ?",
+                    (status, task_id),
+                ).fetchall()
         return [dict(r) for r in rows]
 
+    def delete_state(self, state_key):
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM sync_state WHERE state_key = ?", (state_key,)
+            )
+            self._conn.commit()
+
+    def set_excluded(self, state_key, now=None):
+        """把某个文件标记为 excluded: 该任务以后不再同步它。"""
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sync_state SET status = 'excluded', last_seen_at = ? "
+                "WHERE state_key = ?",
+                (now, state_key),
+            )
+            self._conn.commit()
+
+    def list_states(self, task_id=None, status=None, limit=200):
+        """按任务 (可再按状态) 列出文件级状态, 最近更新的在前。"""
+        sql = "SELECT * FROM sync_state"
+        conds, params = [], []
+        if task_id is not None:
+            conds.append("task_id = ?")
+            params.append(task_id)
+        if status:
+            conds.append("status = ?")
+            params.append(status)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY last_seen_at DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def sum_done_size(self, task_id=None):
+        with self._lock:
+            if task_id is None:
+                row = self._conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM sync_state "
+                    "WHERE status = 'done'"
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM sync_state "
+                    "WHERE status = 'done' AND task_id = ?",
+                    (task_id,),
+                ).fetchone()
+        return int(row[0] or 0)
+
     def record_failure(self, *, state_key, source_path, source_file_id, size,
-                       check_value, target_path, error, now=None):
+                       check_value, target_path, error, task_id="", now=None):
         now = now if now is not None else time.time()
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO sync_state
-                    (state_key, source_path, source_file_id, size, check_value,
-                     target_path, status, retry_count, first_seen_at,
-                     last_seen_at, finished_at, gone_at, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, 'failed', 1, ?, ?, NULL, NULL, ?)
+                    (state_key, task_id, source_path, source_file_id, size,
+                     check_value, target_path, status, retry_count,
+                     first_seen_at, last_seen_at, finished_at, gone_at,
+                     last_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', 1, ?, ?, NULL, NULL, ?)
                 ON CONFLICT(state_key) DO UPDATE SET
                     status = 'failed',
                     retry_count = sync_state.retry_count + 1,
                     last_seen_at = excluded.last_seen_at,
                     last_error = excluded.last_error
                 """,
-                (state_key, source_path, source_file_id, size, check_value,
-                 target_path, now, now, error),
+                (state_key, task_id, source_path, source_file_id, size,
+                 check_value, target_path, now, now, error),
             )
             self._conn.commit()
 
@@ -190,14 +262,21 @@ class SyncStore:
             )
             self._conn.commit()
 
-    def mark_missing_as_gone(self, seen_keys, now=None):
+    def mark_missing_as_gone(self, seen_keys, task_id=None, now=None):
         """本轮没见到的 done/failed 记录标记 source_gone, 返回标记条数。"""
         now = now if now is not None else time.time()
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT state_key FROM sync_state "
-                "WHERE status IN ('done', 'failed')"
-            ).fetchall()
+            if task_id is None:
+                rows = self._conn.execute(
+                    "SELECT state_key FROM sync_state "
+                    "WHERE status IN ('done', 'failed')"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT state_key FROM sync_state "
+                    "WHERE status IN ('done', 'failed') AND task_id = ?",
+                    (task_id,),
+                ).fetchall()
             missing = [r[0] for r in rows if r[0] not in seen_keys]
             for key in missing:
                 self._conn.execute(
@@ -210,13 +289,15 @@ class SyncStore:
 
     # ---------- sync_task (面板历史) ----------
 
-    def begin_task(self, *, file_name, source_path, target_path, size, now=None):
+    def begin_task(self, *, file_name, source_path, target_path, size,
+                   task_id="", now=None):
         now = now if now is not None else time.time()
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO sync_task (file_name, source_path, target_path, "
-                "size, status, started_at) VALUES (?, ?, ?, ?, 'syncing', ?)",
-                (file_name, source_path, target_path, size, now),
+                "INSERT INTO sync_task (task_id, file_name, source_path, "
+                "target_path, size, status, started_at) "
+                "VALUES (?, ?, ?, ?, ?, 'syncing', ?)",
+                (task_id, file_name, source_path, target_path, size, now),
             )
             self._conn.commit()
             return cur.lastrowid
@@ -231,29 +312,55 @@ class SyncStore:
             )
             self._conn.commit()
 
-    def finish_open_task(self, source_path, status, error=None, now=None):
+    def finish_open_task(self, source_path, status, error=None, task_id=None,
+                         now=None):
         """把某个源文件还处于 syncing 的面板任务结掉 (跨轮校验完成时用)。"""
         now = now if now is not None else time.time()
         with self._lock:
-            self._conn.execute(
-                "UPDATE sync_task SET status = ?, error = ?, finished_at = ? "
-                "WHERE source_path = ? AND status = 'syncing'",
-                (status, error, now, source_path),
-            )
+            if task_id is None:
+                self._conn.execute(
+                    "UPDATE sync_task SET status = ?, error = ?, "
+                    "finished_at = ? WHERE source_path = ? "
+                    "AND status = 'syncing'",
+                    (status, error, now, source_path),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE sync_task SET status = ?, error = ?, "
+                    "finished_at = ? WHERE source_path = ? "
+                    "AND task_id = ? AND status = 'syncing'",
+                    (status, error, now, source_path, task_id),
+                )
             self._conn.commit()
 
-    def list_tasks(self, limit=50):
+    def list_tasks(self, limit=50, task_id=None):
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM sync_task ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if task_id is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM sync_task ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM sync_task WHERE task_id = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (task_id, limit),
+                ).fetchall()
         return [dict(r) for r in rows]
 
-    def count_states(self):
+    def count_states(self, task_id=None):
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT status, COUNT(*) AS n FROM sync_state GROUP BY status"
-            ).fetchall()
+            if task_id is None:
+                rows = self._conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM sync_state "
+                    "GROUP BY status"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM sync_state "
+                    "WHERE task_id = ? GROUP BY status",
+                    (task_id,),
+                ).fetchall()
         return {r[0]: r[1] for r in rows}
 
     # ---------- 清理 ----------

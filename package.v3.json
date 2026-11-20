@@ -1,21 +1,11 @@
 {
-  "RcloneWebdavBackup": {
-    "name": "Rclone WebDAV 增量备份",
-    "description": "通过 Rclone RC 将 Alist WebDAV 增量备份到 CloudDrive2，SQLite 记录路径和大小并支持并发、定时及失败续跑。",
-    "labels": "备份,WebDAV,Rclone",
-    "version": "1.0.3",
-    "icon": "Moviepilot_A.png",
-    "author": "OpenAI",
-    "level": 1,
-    "system_version": ">=3.0.0",
-    "history": {
-      "v1.0.0": "首次发布：SQLite 增量记录、RC copy、目标校验、并发和 Cron。"
-    }
-  },
-    "CloudDrive2Sync": {
+  "CloudDrive2Sync": {
     "author": "Hu",
-    "description": "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。",
+    "description": "多任务版: 每个任务独立源/目标与模式 (同步/备份/移动), Vue 联邦前端, 基于 CloudDrive2 gRPC API 异步复制跨轮校验。",
     "history": {
+      "v0.4.0": "前端改左右主从布局: 左侧任务列表 (底部新建任务), 右侧任务详情 (已同步/同步中/失败统计) 与文件列表, 文件可删除 (删目标副本并排除), 失败项可重试/删除; 新增 /files /retry_file /delete_file 接口。",
+      "v0.3.0": "多任务处理 (每任务独立状态), 新增备份模式 (只增不减/变化改名保留旧版) 与移动模式 (校验后删源), 新增 Vue 联邦前端 (Config 任务编辑器/Page 任务总览/AppPage 侧栏页/Dashboard)。",
+      "v0.2.1": "注册远程命令 /cd2sync (PluginAction, action=cd2sync_run), 触发一次增量同步, 与配置页“立即运行一次”走同一入口, 不在事件回调里同步跑完整轮。",
       "v0.2.0": "修复异步复制误判: CopyFile 提交后按 GetCopyTasks 状态跨轮校验, 不再立即复查判失败; 配置表单分组美化, 任务页面美化, 新增校验等待/超时和冲突策略配置。",
       "v0.1.0": "骨架版本: 生命周期/配置/页面/API/定时服务, 同步引擎, SQLite WAL 状态库, CD2 gRPC 客户端适配层。"
     },
@@ -24,6 +14,6 @@
     "level": 1,
     "name": "CloudDrive2 网盘增量同步",
     "system_version": ">=3.0.0",
-    "version": "0.2.0"
+    "version": "0.4.0"
   }
 }

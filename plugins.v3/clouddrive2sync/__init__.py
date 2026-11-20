@@ -4,6 +4,9 @@ v0.2.0:
 - CD2 CopyFile 是异步操作, 完成判定改为 GetCopyTasks 的 CopyTask 状态
   + 跨轮校验, 不再在提交后立即复查 (必然失败);
 - 配置表单分组卡片化, 任务页面美化 (状态图标/概览卡片)。
+v0.2.1:
+- 注册远程命令 /cd2sync (EventType.PluginAction, action=cd2sync_run),
+  触发一次增量同步, 与配置页“立即运行一次”走同一入口。
 """
 from __future__ import annotations
 
@@ -12,6 +15,18 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+
+try:
+    from app.schemas.types import EventType
+    from app.sdk.events import Event, eventmanager
+except Exception:  # 无宿主环境 (本地测试) 时的最小替身
+    Event = None  # type: ignore
+    eventmanager = None  # type: ignore
+
+    class EventType:  # type: ignore
+        """仅供本地导入/测试的替身, 宿主里用真实枚举。"""
+
+        PluginAction = "PluginAction"
 
 try:
     from app.sdk.plugin import _PluginBase
@@ -38,12 +53,12 @@ except Exception:  # pragma: no cover
     logger = logging.getLogger("CloudDrive2Sync")
 
 try:
-    from .cd2_client import Cd2GrpcClient
+    from .cd2_client import Cd2Error, Cd2GrpcClient
     from .config import SyncConfig
     from .store import SyncStore
     from .sync_engine import SyncEngine
 except ImportError:  # 直接以顶层模块加载时
-    from cd2_client import Cd2GrpcClient
+    from cd2_client import Cd2Error, Cd2GrpcClient
     from config import SyncConfig
     from store import SyncStore
     from sync_engine import SyncEngine
@@ -70,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.4.0"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -141,12 +156,33 @@ class CloudDrive2Sync(_PluginBase):
 
     # ---------- 同步入口 ----------
 
-    def run_sync(self):
-        """执行一轮同步, 返回 summary 字典 (供 API / 调度调用)。"""
+    def run_sync(self, task_id=None):
+        """执行一轮同步 (全部任务, 或指定 task_id 的单个任务)。"""
         if self._engine is None:
             return {"skipped_run": True, "reason": "plugin not initialized"}
-        summary = self._engine.run_once()
+        summary = self._engine.run_once(task_id=task_id)
         return asdict(summary)
+
+    # ---------- Vue 前端 (模块联邦) ----------
+
+    def get_render_mode(self):
+        """Vue 联邦渲染: 产物在 dist/assets (remoteEntry.js)。"""
+        return "vue", "dist/assets"
+
+    def get_sidebar_nav(self) -> list[dict[str, Any]]:
+        """侧栏全页入口: 任务总览页 (AppPage 组件)。"""
+        if not self.get_state():
+            return []
+        return [
+            {
+                "nav_key": "main",
+                "title": "CloudDrive2 同步",
+                "icon": "mdi-cloud-sync",
+                "section": "organize",
+                "permission": "manage",
+                "order": 60,
+            }
+        ]
 
     # ---------- 定时服务 ----------
 
@@ -168,10 +204,56 @@ class CloudDrive2Sync(_PluginBase):
             }
         ]
 
+    # ---------- 远程命令 ----------
+
+    def _handle_plugin_action(self, event) -> None:
+        """处理 PluginAction 事件, 只响应本插件的 /cd2sync 动作。
+
+        触发方式与配置页“立即运行一次”相同 (走 _run_once_async,
+        宿主调度器优先, 否则守护线程), 不在事件回调里同步跑完整轮
+        同步, 避免阻塞消息回复。未启用 / 未初始化时只记日志, 不报错。
+        """
+        event_data = getattr(event, "event_data", None) or {}
+        if isinstance(event_data, dict) and event_data.get("action") != "cd2sync_run":
+            return
+        if not self.get_state() or self._engine is None:
+            logger.warning("[CloudDrive2Sync] /cd2sync 已触发, 但插件未启用或未初始化")
+            return
+        logger.info("[CloudDrive2Sync] /cd2sync 触发一次增量同步")
+        self._run_once_async()
+        post = getattr(self, "post_message", None)
+        if callable(post):
+            try:
+                post(title="CloudDrive2Sync", text="已触发一次增量同步, 进度见插件任务页。")
+            except Exception as exc:  # 宿主消息接口签名不同时不影响同步本身
+                logger.warning("[CloudDrive2Sync] 发送触发确认失败: " + str(exc))
+
+    if eventmanager is not None:
+        @eventmanager.register(EventType.PluginAction)
+        def run_command(self, event: "Event") -> None:
+            """宿主环境: 按官方文档注册 PluginAction 处理器。"""
+            self._handle_plugin_action(event)
+    else:
+        def run_command(self, event) -> None:
+            """本地测试环境: 无宿主事件管理器时, 方法仍可直接调用单测。"""
+            self._handle_plugin_action(event)
+
     @staticmethod
     def get_command() -> list[dict[str, Any]]:
-        """远程命令暂未注册 (骨架), 手动触发走 API 或配置页立即运行。"""
-        return []
+        """注册远程命令 /cd2sync, 触发一次增量同步。
+
+        格式按官方 Plugin_Development.md §9.1:
+        cmd + EventType.PluginAction + data.action 路由。
+        """
+        return [
+            {
+                "cmd": "/cd2sync",
+                "event": EventType.PluginAction,
+                "desc": "立即执行一次 CloudDrive2 增量同步",
+                "category": "插件命令",
+                "data": {"action": "cd2sync_run"},
+            }
+        ]
 
     # ---------- API ----------
 
@@ -198,23 +280,121 @@ class CloudDrive2Sync(_PluginBase):
                 "auth": "bear",
                 "summary": "插件状态与状态库计数",
             },
+            {
+                "path": "/files",
+                "endpoint": self.api_files,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "按任务列出文件级同步状态",
+            },
+            {
+                "path": "/retry_file",
+                "endpoint": self.api_retry_file,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重试某个失败文件 (清记录并重跑所属任务)",
+            },
+            {
+                "path": "/delete_file",
+                "endpoint": self.api_delete_file,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除目标端副本并排除该文件 (不再同步)",
+            },
         ]
 
-    def api_run_once(self):
-        return self.run_sync()
+    def api_run_once(self, task_id: str = None):
+        return self.run_sync(task_id=task_id or None)
 
-    def api_tasks(self, limit: int = 50):
+    def api_tasks(self, limit: int = 50, task_id: str = None):
         if self._store is None:
             return []
-        return self._store.list_tasks(limit=int(limit))
+        return self._store.list_tasks(
+            limit=int(limit), task_id=task_id or None
+        )
 
     def api_status(self):
+        tasks = []
+        if self._config:
+            for task in self._config.tasks:
+                tasks.append(
+                    {
+                        "id": task.id,
+                        "name": task.name,
+                        "enabled": task.enabled,
+                        "mode": task.mode,
+                        "source_path": task.source_path,
+                        "target_path": task.target_path,
+                        "conflict_policy": task.conflict_policy,
+                        "delete_empty_dirs": task.delete_empty_dirs,
+                        "states": (
+                            self._store.count_states(task.id)
+                            if self._store
+                            else {}
+                        ),
+                        "done_size": (
+                            self._store.sum_done_size(task.id)
+                            if self._store
+                            else 0
+                        ),
+                    }
+                )
         return {
             "enabled": self.get_state(),
-            "source_path": self._config.source_path if self._config else "",
-            "target_path": self._config.target_path if self._config else "",
+            "tasks": tasks,
             "states": self._store.count_states() if self._store else {},
         }
+
+    def api_files(self, task_id: str = None, status: str = None,
+                  limit: int = 200):
+        if self._store is None:
+            return []
+        rows = self._store.list_states(
+            task_id=task_id or None, status=status or None,
+            limit=int(limit),
+        )
+        for row in rows:
+            row["file_name"] = str(row.get("source_path") or "").rstrip(
+                "/"
+            ).rsplit("/", 1)[-1]
+        return rows
+
+    def api_retry_file(self, state_key: str = ""):
+        """重试失败文件: 删掉失败状态行, 然后异步重跑它所属的任务。"""
+        if self._store is None or not state_key:
+            return {"ok": False, "error": "参数缺失"}
+        state = self._store.get_state(state_key)
+        if state is None:
+            return {"ok": False, "error": "记录不存在"}
+        if state.get("status") == "copying":
+            return {"ok": False, "error": "文件正在同步中, 不能重试"}
+        task_id = state.get("task_id") or None
+        self._store.delete_state(state_key)
+        threading.Thread(
+            target=self.run_sync, kwargs={"task_id": task_id}, daemon=True
+        ).start()
+        return {"ok": True, "task_id": task_id}
+
+    def api_delete_file(self, state_key: str = ""):
+        """删除文件: 删目标端副本 + 标记 excluded (该任务不再同步它)。
+
+        源文件不动 (移动模式的源文件此前已按规则删除)。同步中的文件
+        不能删 (CD2 复制任务无法按单文件取消)。
+        """
+        if self._store is None or self._client is None or not state_key:
+            return {"ok": False, "error": "参数缺失或插件未初始化"}
+        state = self._store.get_state(state_key)
+        if state is None:
+            return {"ok": False, "error": "记录不存在"}
+        if state.get("status") == "copying":
+            return {"ok": False, "error": "文件正在同步中, 不能删除"}
+        if state.get("status") == "done":
+            try:
+                self._client.delete_file(state["target_path"])
+            except Cd2Error as exc:
+                return {"ok": False, "error": "删除目标文件失败: " + str(exc)}
+        self._store.set_excluded(state_key)
+        return {"ok": True}
 
     # ---------- 配置表单 ----------
 
