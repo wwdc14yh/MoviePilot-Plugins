@@ -466,7 +466,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.2"
+    assert plugin.plugin_version == "0.4.3"
     plugin.stop_service()
 
 
@@ -537,3 +537,45 @@ def test_copy_submit_deadline_becomes_pending_not_failed(tmp_path):
     s2 = engine.run_once()
     assert s2.verified == 3 and s2.failed == 0
     assert fake.copy_calls == 3  # 没有重复提交
+
+
+def test_files_pagination_and_save_global(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_page", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_page"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    saved = {}
+    plugin.update_config = lambda cfg: saved.update(cfg) or True
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "t1", "name": "任务一", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"}]})
+    store = plugin._store
+    for i in range(25):
+        store.upsert_done(
+            state_key=store_mod.state_key_of("t1", f"f{i}", f"/A/{i}.mkv"),
+            task_id="t1", source_path=f"/A/{i}.mkv",
+            source_file_id=f"f{i}", size=100 + i, check_value=f"h{i}",
+            target_path=f"/B/{i}.mkv")
+    # 分页: 第一页 10 条, 总数 25; 第三页 5 条
+    p1 = plugin.api_files(task_id="t1", limit=10, offset=0)
+    assert p1["total"] == 25 and len(p1["files"]) == 10
+    p3 = plugin.api_files(task_id="t1", limit=10, offset=20)
+    assert len(p3["files"]) == 5
+    names = {r["file_name"] for r in p1["files"]}
+    assert names.isdisjoint({r["file_name"] for r in p3["files"]})
+    # 状态过滤分页
+    pf = plugin.api_files(task_id="t1", status="failed", limit=10, offset=0)
+    assert pf["total"] == 0 and pf["files"] == []
+    # 全局设置: 改间隔/超时, 任务列表不受影响
+    res = plugin.api_save_global(interval_minutes=45, copy_timeout_seconds=300)
+    assert res["ok"]
+    assert plugin._config.interval_minutes == 45
+    assert plugin._config.copy_timeout_seconds == 300
+    assert len(plugin._config.tasks) == 1
+    # /status 带全局配置
+    st = plugin.api_status()
+    assert st["config"]["interval_minutes"] == 45
+    plugin.stop_service()

@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-CdTLGLGK.js';
-import _sfc_main from './__federation_expose_Page-cqQfEWYm.js';
+import Page from './__federation_expose_Page-v9kZrHnH.js';
 
 true&&(function polyfill() {
   const relList = document.createElement("link").relList;
@@ -42,4 +42,4 @@ true&&(function polyfill() {
 // 本地开发入口: 宿主环境中组件由模块联邦直接加载, 不走这里。
 const {createApp,h} = await importShared('vue');
 
-createApp({ render: () => h(_sfc_main) }).mount('#app');
+createApp({ render: () => h(Page) }).mount('#app');

@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.4.2"
+    plugin_version = "0.4.3"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -317,6 +317,13 @@ class CloudDrive2Sync(_PluginBase):
                 "auth": "bear",
                 "summary": "删除一个任务 (直接落盘配置)",
             },
+            {
+                "path": "/save_global",
+                "endpoint": self.api_save_global,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存全局设置 (直接落盘配置)",
+            },
         ]
 
     def api_run_once(self, task_id: str = None):
@@ -359,21 +366,28 @@ class CloudDrive2Sync(_PluginBase):
             "enabled": self.get_state(),
             "tasks": tasks,
             "states": self._store.count_states() if self._store else {},
+            "config": self._config.to_dict() if self._config else {},
         }
 
     def api_files(self, task_id: str = None, status: str = None,
-                  limit: int = 200):
+                  limit: int = 20, offset: int = 0):
+        """服务端分页: 返回 {files, total, limit, offset}, 避免长列表卡顿。"""
         if self._store is None:
-            return []
+            return {"files": [], "total": 0, "limit": int(limit),
+                    "offset": int(offset)}
         rows = self._store.list_states(
             task_id=task_id or None, status=status or None,
-            limit=int(limit),
+            limit=int(limit), offset=int(offset),
+        )
+        total = self._store.count_states_filtered(
+            task_id=task_id or None, status=status or None
         )
         for row in rows:
             row["file_name"] = str(row.get("source_path") or "").rstrip(
                 "/"
             ).rsplit("/", 1)[-1]
-        return rows
+        return {"files": rows, "total": total, "limit": int(limit),
+                "offset": int(offset)}
 
     def api_retry_file(self, state_key: str = ""):
         """重试失败文件: 删掉失败状态行, 然后异步重跑它所属的任务。"""
@@ -460,6 +474,25 @@ class CloudDrive2Sync(_PluginBase):
             return {"ok": False, "error": "任务不存在"}
         self._persist_config()
         return {"ok": True}
+
+    def api_save_global(self, config: dict = None, **kwargs):
+        """保存全局设置: 只合并全局字段, 任务列表原样保留, 落盘后重初始化。
+
+        让插件页面 (含侧边栏整页) 自带全局设置入口, 不依赖宿主跳转。
+        """
+        payload = dict(config or {})
+        payload.update(kwargs)
+        if self._config is None:
+            self._config = SyncConfig.from_dict({})
+        data = self._config.to_dict()
+        from .config import _GLOBAL_FIELDS
+
+        for key in _GLOBAL_FIELDS:
+            if key in payload:
+                data[key] = payload[key]
+        self._config = SyncConfig.from_dict(data)
+        self._persist_config()
+        return {"ok": True, "config": self._config.to_dict()}
 
     # ---------- 配置表单 ----------
 

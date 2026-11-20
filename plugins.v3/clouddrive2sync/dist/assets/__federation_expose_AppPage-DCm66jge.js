@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-CdTLGLGK.js';
-import _sfc_main$1 from './__federation_expose_Page-cqQfEWYm.js';
+import Page from './__federation_expose_Page-v9kZrHnH.js';
 
 const {createVNode:_createVNode,openBlock:_openBlock,createElementBlock:_createElementBlock} = await importShared('vue');
 
@@ -24,7 +24,7 @@ const emit = __emit;
 
 return (_ctx, _cache) => {
   return (_openBlock(), _createElementBlock("div", _hoisted_1, [
-    _createVNode(_sfc_main$1, {
+    _createVNode(Page, {
       api: __props.api,
       "plugin-id": __props.pluginId,
       onAction: _cache[0] || (_cache[0] = $event => (emit('action')))

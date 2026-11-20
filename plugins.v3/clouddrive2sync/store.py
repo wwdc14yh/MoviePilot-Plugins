@@ -197,8 +197,8 @@ class SyncStore:
             )
             self._conn.commit()
 
-    def list_states(self, task_id=None, status=None, limit=200):
-        """按任务 (可再按状态) 列出文件级状态, 最近更新的在前。"""
+    def list_states(self, task_id=None, status=None, limit=200, offset=0):
+        """按任务 (可再按状态) 列出文件级状态, 最近更新的在前。支持分页。"""
         sql = "SELECT * FROM sync_state"
         conds, params = [], []
         if task_id is not None:
@@ -209,11 +209,28 @@ class SyncStore:
             params.append(status)
         if conds:
             sql += " WHERE " + " AND ".join(conds)
-        sql += " ORDER BY last_seen_at DESC LIMIT ?"
+        sql += " ORDER BY last_seen_at DESC LIMIT ? OFFSET ?"
         params.append(int(limit))
+        params.append(int(offset))
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    def count_states_filtered(self, task_id=None, status=None):
+        """与 list_states 同条件的总数, 给前端分页用。"""
+        sql = "SELECT COUNT(*) FROM sync_state"
+        conds, params = [], []
+        if task_id is not None:
+            conds.append("task_id = ?")
+            params.append(task_id)
+        if status:
+            conds.append("status = ?")
+            params.append(status)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+        return int(row[0] or 0)
 
     def sum_done_size(self, task_id=None):
         with self._lock:
