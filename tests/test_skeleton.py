@@ -557,7 +557,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.6.3"
+    assert plugin.plugin_version == "0.6.4"
     plugin.stop_service()
 
 
@@ -1065,6 +1065,12 @@ def test_per_task_scan_interval_services(tmp_path):
                                source_path="/A", target_path="/B",
                                interval_minutes=45)
     assert res["ok"] and res["task"]["interval_minutes"] == 45
+    # 回归: /status 必须把 interval_minutes 带回给前端, 否则编辑弹窗
+    # 读不到已保存的值, 永远显示默认 30 (v0.6.3 的实际 bug)
+    st = plugin.api_status()
+    by_id = {x["id"]: x for x in st["tasks"]}
+    assert by_id["ta"]["interval_minutes"] == 45
+    assert by_id["tb"]["interval_minutes"] == 60
     plugin.stop_service()
 
 

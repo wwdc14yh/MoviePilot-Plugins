@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.6.3"
+    plugin_version = "0.6.4"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -414,6 +414,7 @@ class CloudDrive2Sync(_PluginBase):
                         "conflict_policy": task.conflict_policy,
                         "delete_empty_dirs": task.delete_empty_dirs,
                         "max_concurrent_sync": task.max_concurrent_sync,
+                        "interval_minutes": task.interval_minutes,
                         "states": (
                             self._store.count_states(task.id)
                             if self._store
