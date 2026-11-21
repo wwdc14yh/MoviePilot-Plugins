@@ -64,34 +64,50 @@ class SyncStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn_real = None
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.executescript(_SCHEMA)
-            # 旧库补列 (可重复执行): v0.1 无 submitted_at, v0.2 无 task_id
-            for table, column, ddl in (
-                ("sync_state", "submitted_at",
-                 "ALTER TABLE sync_state ADD COLUMN submitted_at REAL"),
-                ("sync_state", "task_id",
-                 "ALTER TABLE sync_state ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"),
-                ("sync_task", "task_id",
-                 "ALTER TABLE sync_task ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"),
-            ):
-                cols = [
-                    r[1]
-                    for r in self._conn.execute(
-                        "PRAGMA table_info(%s)" % table
-                    ).fetchall()
-                ]
-                if column not in cols:
-                    self._conn.execute(ddl)
-            self._conn.commit()
+            _ = self._conn  # 触发首次打开
+
+    @property
+    def _conn(self):
+        # 所有调用点都持有 _lock; 连接被 close 后自动重开,
+        # 避免插件重初始化与正在运行的轮次并发时报
+        # "Cannot operate on a closed database"
+        if self._conn_real is None:
+            self._open_locked()
+        return self._conn_real
+
+    @_conn.setter
+    def _conn(self, value):
+        self._conn_real = value
+
+    def _open_locked(self):
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        self._conn_real = conn
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(_SCHEMA)
+        conn.commit()
 
     def close(self):
         with self._lock:
-            self._conn.close()
+            if self._conn_real is not None:
+                try:
+                    self._conn_real.close()
+                finally:
+                    self._conn_real = None
+
+    def purge_task(self, task_id):
+        """删除某个同步任务的全部状态与历史记录 (删任务时连带清理)。"""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM sync_state WHERE task_id = ?", (task_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM sync_task WHERE task_id = ?", (task_id,)
+            )
+            self._conn.commit()
 
     # ---------- sync_state ----------
 
@@ -186,6 +202,30 @@ class SyncStore:
             )
             self._conn.commit()
 
+    def mark_skipped(self, state_key, error, now=None):
+        """把状态标记为跳过 (落库为 excluded): 引擎永不自动重交,
+        原因写进 last_error 备查。用于远端失败且源/目标不存在时。"""
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sync_state SET status = 'excluded', "
+                "last_error = ?, last_seen_at = ? WHERE state_key = ?",
+                (error, now, state_key),
+            )
+            self._conn.commit()
+
+    def mark_copying(self, state_key, now=None):
+        """把状态打回 copying 并刷新提交时间 (RestartCopyTask 成功后用)。"""
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sync_state SET status = 'copying', "
+                "submitted_at = ?, last_seen_at = ?, last_error = NULL "
+                "WHERE state_key = ?",
+                (now, now, state_key),
+            )
+            self._conn.commit()
+
     def set_excluded(self, state_key, now=None):
         """把某个文件标记为 excluded: 该任务以后不再同步它。"""
         now = now if now is not None else time.time()
@@ -268,7 +308,12 @@ class SyncStore:
                 (state_key, task_id, source_path, source_file_id, size,
                  check_value, target_path, now, now, error),
             )
+            row = self._conn.execute(
+                "SELECT retry_count FROM sync_state WHERE state_key = ?",
+                (state_key,),
+            ).fetchone()
             self._conn.commit()
+        return int(row[0] or 0) if row else 0
 
     def touch_seen(self, state_key, now=None):
         now = now if now is not None else time.time()

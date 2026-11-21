@@ -33,6 +33,8 @@ _GLOBAL_FIELDS = (
     "failed_retention_days",
     "state_tombstone_days",
     "onlyonce",
+    "debug_logging",
+    "copy_poll_interval_seconds",
 )
 
 _GLOBAL_DEFAULTS = {
@@ -49,6 +51,8 @@ _GLOBAL_DEFAULTS = {
     "failed_retention_days": 90,
     "state_tombstone_days": 30,
     "onlyonce": False,
+    "debug_logging": False,
+    "copy_poll_interval_seconds": 10,
 }
 
 _TASK_FIELDS = (
@@ -159,6 +163,9 @@ class SyncConfig:
     failed_retention_days: int = _GLOBAL_DEFAULTS["failed_retention_days"]
     state_tombstone_days: int = _GLOBAL_DEFAULTS["state_tombstone_days"]
     onlyonce: bool = _GLOBAL_DEFAULTS["onlyonce"]
+    debug_logging: bool = _GLOBAL_DEFAULTS["debug_logging"]
+    copy_poll_interval_seconds: int = _GLOBAL_DEFAULTS[
+        "copy_poll_interval_seconds"]
     tasks: list = field(default_factory=list)
     # 旧单任务字段, 仅迁移来源, 不再单独使用
     source_path: str = ""

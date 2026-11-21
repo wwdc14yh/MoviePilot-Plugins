@@ -84,10 +84,12 @@ class SyncEngine:
         self.config = config
         self.logger = logger
         self._lock = threading.Lock()
+        self._stopped = False
         self._last_cleanup = 0.0
         self._target_cache = {}
         self._ensured_dirs = set()
         self._settled_keys = set()
+        self._backlog = {}
 
     def _log(self, msg):
         if self.logger:
@@ -95,21 +97,45 @@ class SyncEngine:
 
     # ---------- 目录工具 ----------
 
+    def _debug(self, msg):
+        if getattr(self.config, "debug_logging", False):
+            self._log("[详细] " + msg)
+
     def _walk_source(self, root):
+        """遍历源目录, 返回 (文件列表, 是否完整)。
+
+        根目录列举失败仍然抛错 (整轮失败); 子目录失败只跳过该目录
+        并标记不完整 —— 例如某个 WebDAV 子目录上游异常时,
+        不该让整个任务全军覆没; 不完整时本轮不做源端消失标记,
+        避免把暂时看不到的文件误判为已删除。
+        """
         files = []
         queue = [root]
         visited = set()
+        complete = True
         while queue:
             current = queue.pop(0)
             if current in visited:
                 continue
             visited.add(current)
-            for item in self.client.list_sub_files(current):
+            try:
+                items = self.client.list_sub_files(current)
+            except Cd2Error as exc:
+                if current == root:
+                    raise
+                complete = False
+                self._log("跳过无法列出的目录 %s: %s" % (current, exc))
+                continue
+            dirs_here = 0
+            for item in items:
                 if item.is_directory:
                     queue.append(item.full_path)
+                    dirs_here += 1
                 else:
                     files.append(item)
-        return files
+            self._debug("遍历 %s: %d 项 (子目录 %d)"
+                        % (current, len(items), dirs_here))
+        return files, complete
 
     def _target_listing(self, target_dir, force_refresh=False):
         if not force_refresh and target_dir in self._target_cache:
@@ -157,7 +183,7 @@ class SyncEngine:
         try:
             return getter()
         except Exception as exc:
-            self._log("GetCopyTasks 失败, 本轮按目标文件出现与否判断: " + str(exc))
+            self._log("GetCopyTasks 失败, 本轮对账跳过: " + str(exc))
             return None
 
     @staticmethod
@@ -193,103 +219,154 @@ class SyncEngine:
         candidates.sort(key=sort_key)
         return candidates[0][1]
 
-    def _verify_state(self, state):
-        """返回 (outcome, detail): outcome in done / failed / pending。
+    def _verify_state(self, state, tasks):
+        """按给定的 CD2 任务列表判定一个 copying 状态的当前结局。
 
-        完成判定以 CD2 官方 CopyTask 状态为准: Completed 且
-        failedFiles=0 即成功, 不查目标文件 (目标会被 MoviePilot
-        整理移走, 缺失是正常现象)。
+        返回 (outcome, detail, matched): outcome in done/failed/pending,
+        matched 是命中的 Cd2CopyTask (没有时 None)。完成判定只看
+        CopyTask 状态 (Completed 且 failedFiles=0), 不查目标文件 ——
+        目标会被 MoviePilot 整理移走, 缺失是正常现象。
         """
         source_path = state["source_path"]
         target_path = state["target_path"]
-        target_dir, name = parent_and_name(target_path)
-        tasks = self._copy_tasks()
+        target_dir, _name = parent_and_name(target_path)
         task = self._find_copy_task(tasks, source_path, target_dir,
                                     target_path=target_path)
         if task is not None:
+            self._debug(
+                "校验 %s: 匹配到 CD2 任务 %s -> %s [状态 %s, 已传 %d/%d, "
+                "失败文件 %d]"
+                % (source_path, task.source_path, task.dest_path,
+                   task.status_name, task.uploaded_files, task.total_files,
+                   task.failed_files)
+            )
             if task.is_failed:
                 detail = "; ".join(task.errors) or "CD2 复制任务失败"
-                return "failed", detail
+                return "failed", detail, task
             if not task.is_completed:
-                return "pending", task.status_name
+                return "pending", task.status_name, task
             failed_files = int(getattr(task, "failed_files", 0) or 0)
             if failed_files > 0:
                 detail = "; ".join(task.errors) or (
                     "CD2 任务完成但有 %d 个文件失败" % failed_files
                 )
-                return "failed", detail
-            return "done", ""
-        if tasks is None:
-            # GetCopyTasks 不可用 (旧客户端) 才退回目标出现判断
-            src = Cd2File(
-                id=str(state.get("source_file_id") or ""),
-                name=name,
-                full_path=source_path,
-                size=int(state.get("size") or 0),
-                check_value=str(state.get("check_value") or ""),
-            )
-            dst = self._target_listing(target_dir, force_refresh=True).get(name)
-            if self._check_ok(src, dst):
-                return "done", ""
-            return "pending", "目标文件尚未出现"
+                return "failed", detail, task
+            return "done", "", task
         # 任务列表里查不到: 可能已被 CD2 清理。提交超过宽限期仍无记录,
         # 按已完成处理 (提交当时已被服务端接受); 宽限期内继续等待。
         submitted = state.get("submitted_at") or state.get("first_seen_at")
         if submitted and time.time() - float(submitted) > _NO_TASK_GRACE_SECONDS:
-            return "done", "CD2 任务列表已无此任务, 按提交成功视为完成"
-        return "pending", "等待 CD2 复制任务出现"
+            return "done", "CD2 任务列表已无此任务, 按提交成功视为完成", None
+        return "pending", "等待 CD2 复制任务出现", None
 
-    def _poll_submitted(self, task, tsum, submitted):
-        """本轮刚提交的文件统一等一小段时间集中结算 (秒传的当场完成,
-        没完成的留 copying 跨轮结算)。submitted 是 [(row_id, state)]。
+    # ---------- 失败判定: 源/目标不存在 ----------
+
+    def _path_exists(self, path):
+        """实查路径是否存在: True/False; 查不准 (父目录都列不出) 返回
+        None。列父目录看名字在不在, 文件和目录都适用。"""
+        parent, name = parent_and_name(path)
+        try:
+            items = self.client.list_sub_files(parent)
+        except Exception:
+            return None
+        return any(it.name == name for it in items)
+
+    def _failure_not_exist_reason(self, state, detail):
+        """判断一次远端失败是不是"源/目标不存在"导致的。
+
+        先实查源文件、再实查目标目录, 都查不准时才看错误文本。
+        返回命中的原因字符串; 不是这类失败返回空串。
         """
-        if not submitted:
+        if self._path_exists(state["source_path"]) is False:
+            return "源文件不存在"
+        target_dir, _ = parent_and_name(state["target_path"])
+        if self._path_exists(target_dir) is False:
+            return "目标目录不存在"
+        text = (detail or "").lower()
+        for kw in ("不存在", "not found", "not exist", "no such", "404"):
+            if kw in text:
+                return "源或目标不存在 (按错误信息判断)"
+        return ""
+
+    # ---------- 对账结果落地 ----------
+
+    def _apply_done(self, task, state, tsum, remove_keys, matched):
+        """远端已完成: 记成功, 移动模式删源, 并登记待清理的 CD2 任务。"""
+        self.store.upsert_done(
+            state_key=state["state_key"],
+            task_id=task.id,
+            source_path=state["source_path"],
+            source_file_id=state.get("source_file_id") or "",
+            size=int(state.get("size") or 0),
+            check_value=state.get("check_value") or "",
+            target_path=state["target_path"],
+        )
+        self.store.finish_open_task(state["source_path"], "done",
+                                    task_id=task.id)
+        tsum.verified += 1
+        if matched is not None:
+            # taskKey 用 CD2 返回的原始路径拼, 不做任何归一化
+            remove_keys.append(
+                "%s:%s" % (matched.source_path, matched.dest_path))
+        if task.mode == "move":
+            if self._delete_source(task, state):
+                tsum.moved += 1
+
+    def _apply_failed(self, task, state, tsum, detail, matched):
+        """远端失败的落地处理。
+
+        源/目标不存在 -> 标记跳过 (excluded), 不再重试; 其它失败 ->
+        记失败, 在"失败最大重试次数"内调 RestartCopyTask 自动重启,
+        超限则停在失败, 等页面手动重试。
+        """
+        reason = self._failure_not_exist_reason(state, detail)
+        if reason:
+            note = "已跳过 (%s): %s" % (reason, detail)
+            self.store.mark_skipped(state["state_key"], note)
+            self.store.finish_open_task(state["source_path"], "failed",
+                                        error=note, task_id=task.id)
+            tsum.failed += 1
+            self._log("复制失败且不再重试 " + state["source_path"]
+                      + ": " + note)
             return
-        wait = max(0, int(self.config.verify_wait_seconds))
-        interval = max(1, int(self.config.verify_interval_seconds))
-        deadline = time.time() + wait
-        remaining = list(submitted)
-        while remaining:
-            nxt = []
-            for row_id, st in remaining:
-                outcome, detail = self._verify_state(st)
-                if outcome == "done":
-                    self.store.upsert_done(
-                        state_key=st["state_key"],
-                        task_id=task.id,
-                        source_path=st["source_path"],
-                        source_file_id=st["source_file_id"],
-                        size=st["size"],
-                        check_value=st["check_value"],
-                        target_path=st["target_path"],
-                    )
-                    self.store.finish_task(row_id, "done")
-                    tsum.copied += 1
-                    if task.mode == "move":
-                        if self._delete_source(task, st):
-                            tsum.moved += 1
-                elif outcome == "failed":
-                    self.store.record_failure(
-                        state_key=st["state_key"],
-                        task_id=task.id,
-                        source_path=st["source_path"],
-                        source_file_id=st["source_file_id"],
-                        size=st["size"],
-                        check_value=st["check_value"],
-                        target_path=st["target_path"],
-                        error=detail,
-                    )
-                    self.store.finish_task(row_id, "failed", error=detail)
-                    tsum.failed += 1
-                    self._log("异步复制失败 " + st["source_path"] + ": " + detail)
-                else:
-                    nxt.append((row_id, st))
-            remaining = nxt
-            if not remaining or time.time() >= deadline:
-                break
-            time.sleep(min(interval, max(0.0, deadline - time.time())))
-        tsum.pending += len(remaining)
-        return len(remaining)
+        retries = self.store.record_failure(
+            state_key=state["state_key"],
+            task_id=task.id,
+            source_path=state["source_path"],
+            source_file_id=state.get("source_file_id") or "",
+            size=int(state.get("size") or 0),
+            check_value=state.get("check_value") or "",
+            target_path=state["target_path"],
+            error=detail,
+        )
+        self.store.finish_open_task(state["source_path"], "failed",
+                                    error=detail, task_id=task.id)
+        tsum.failed += 1
+        self._log("异步复制失败 " + state["source_path"] + ": " + detail)
+        if matched is None:
+            return
+        if retries > int(self.config.max_retries):
+            self._log("已达最大重试次数, 不再自动重启 "
+                      + state["source_path"])
+            return
+        try:
+            self.client.restart_copy_task(matched.source_path,
+                                          matched.dest_path)
+        except Exception as exc:
+            self._log("自动重启复制任务失败 " + state["source_path"]
+                      + ": " + str(exc))
+            return
+        self.store.mark_copying(state["state_key"])
+        _parent, fname = parent_and_name(state["source_path"])
+        self.store.begin_task(
+            file_name=fname,
+            source_path=state["source_path"],
+            target_path=state["target_path"],
+            size=int(state.get("size") or 0),
+            task_id=task.id,
+        )
+        self._log("失败任务已自动重启 (第 %d 次) %s"
+                  % (retries, state["source_path"]))
 
     def _submit_one(self, task, tsum, cand):
         """提交一个文件的复制。成功/超时返回 (row_id, state), 失败返回
@@ -350,29 +427,19 @@ class SyncEngine:
         return row_id, state_like
 
     def _submit_candidates(self, task, tsum, candidates, in_flight, limit):
-        """按并发上限分批提交: 任一时刻在传文件数不超过 limit。
+        """按并发上限提交候选: 在传数 (含往轮未完成的) 不超过 limit。
 
-        一批里有文件在等待窗口内完成 (如秒传) 就腾出名额继续下一批;
-        全部卡住时停止, 没提交的文件计暂缓, 下一轮继续。
+        超出部分计暂缓: 名额随轮询对账完成而腾出时补交, 或等下一轮
+        扫描。完成状态一律由 poll_copy_tasks 对账, 这里提交完即返回。
         """
         idx = 0
         total = len(candidates)
-        while idx < total:
-            batch = []
-            while idx < total and in_flight < limit:
-                cand = candidates[idx]
-                idx += 1
-                row_id, state_like = self._submit_one(task, tsum, cand)
-                if state_like is not None:
-                    batch.append((row_id, state_like))
-                    in_flight += 1
-            if not batch:
-                break
-            pending_left = self._poll_submitted(task, tsum, batch)
-            resolved = len(batch) - pending_left
-            in_flight -= resolved
-            if resolved == 0:
-                break
+        while idx < total and in_flight < limit:
+            cand = candidates[idx]
+            idx += 1
+            _row_id, state_like = self._submit_one(task, tsum, cand)
+            if state_like is not None:
+                in_flight += 1
         tsum.deferred += (total - idx)
 
     # ---------- 移动模式: 校验后删源 ----------
@@ -410,139 +477,130 @@ class SyncEngine:
                 return
             parent, _ = parent_and_name(parent)
 
-    # ---------- 单个任务 ----------
+    # ---------- 轮询对账 (后台服务, 间隔读全局配置) ----------
 
-    def _settle_copying(self, task, tsum):
-        self._settled_keys = set()
-        now = time.time()
-        timeout_secs = max(1, int(self.config.pending_timeout_hours)) * 3600
-        unmatched = []
-        for state in self.store.list_states_by_status("copying",
-                                                      task_id=task.id):
-            outcome, detail = self._verify_state(state)
-            if outcome == "done":
-                self.store.upsert_done(
-                    state_key=state["state_key"],
-                    task_id=task.id,
-                    source_path=state["source_path"],
-                    source_file_id=state.get("source_file_id") or "",
-                    size=int(state.get("size") or 0),
-                    check_value=state.get("check_value") or "",
-                    target_path=state["target_path"],
-                )
-                self.store.finish_open_task(state["source_path"], "done",
-                                            task_id=task.id)
-                tsum.verified += 1
-                self._settled_keys.add(state["state_key"])
-                if task.mode == "move":
-                    if self._delete_source(task, state):
-                        tsum.moved += 1
-                continue
-            if outcome == "pending":
-                if detail == "等待 CD2 复制任务出现":
-                    unmatched.append(state["source_path"])
-                submitted = state.get("submitted_at") or state.get("first_seen_at")
-                if submitted and now - float(submitted) > timeout_secs:
-                    outcome = "failed"
-                    detail = "复制超时: 已提交 %d 小时仍未完成" % (
-                        timeout_secs // 3600
-                    )
-                else:
-                    tsum.pending += 1
-                    continue
-            self.store.record_failure(
-                state_key=state["state_key"],
-                task_id=task.id,
-                source_path=state["source_path"],
-                source_file_id=state.get("source_file_id") or "",
-                size=int(state.get("size") or 0),
-                check_value=state.get("check_value") or "",
-                target_path=state["target_path"],
-                error=detail,
-            )
-            self.store.finish_open_task(state["source_path"], "failed",
-                                        error=detail, task_id=task.id)
-            tsum.failed += 1
-            self._settled_keys.add(state["state_key"])
-            self._log("异步复制失败 " + state["source_path"] + ": " + detail)
-        if unmatched:
-            # 诊断: 有文件在等任务却匹配不上时, 把 CD2 实际返回的任务
-            # 列表打出来, 便于定位是路径形态还是任务已被清理的问题
-            visible = self._copy_tasks() or []
-            brief = "; ".join(
-                "%s -> %s [%s]" % (
-                    t.source_path, t.dest_path,
-                    getattr(t, "status_name", t.status),
-                )
-                for t in visible[:5]
-            ) or "(空)"
-            self._log(
-                "结算未匹配: %d 个文件在 GetCopyTasks 里找不到对应任务 "
-                "(共 %d 个任务): %s" % (len(unmatched), len(visible), brief)
-            )
+    def poll_copy_tasks(self):
+        """把数据库状态与 CD2 远端状态对齐 (本地必须与远端一致)。
 
-    def settle_only(self):
-        """只做结算 (同步中 -> 已同步/失败) 与失败项复检, 不扫描不提交。
-
-        页面打开/刷新时调用, 让状态及时跟上 CD2 的实际完成情况,
-        不必等下一轮定时同步。返回各任务的结算计数。
+        - 远端 Completed: 记成功 (移动模式删源), 并用 RemoveCopyTasks
+          按 key 删掉这条 CD2 已完成任务
+        - 远端 Failed: 源/目标不存在 -> 标记跳过; 其它 -> 记失败并
+          在重试上限内 RestartCopyTask 自动重启
+        - 进行中: 不处理, 等下一轮轮询
+        - 数据库里的失败记录若远端其实已完成, 修正为已同步
+        轮询间隔由全局配置 copy_poll_interval_seconds 控制 (宿主
+        get_service 注册), 本方法只负责一轮对账。扫描轮次腾出名额后,
+        有积压的任务会在对账后补一轮扫描提交。
         """
         if not self._lock.acquire(blocking=False):
             return {"skipped": True}
         try:
-            result = {}
-            for task in self.config.tasks:
-                if not task.enabled:
+            tasks_by_id = {t.id: t for t in self.config.tasks}
+            copying = self.store.list_states_by_status("copying")
+            failed_states = self.store.list_states_by_status("failed")
+            if not copying and not failed_states:
+                return {}
+            cd2_tasks = self._copy_tasks()
+            if cd2_tasks is None:
+                self._log("轮询对账跳过: GetCopyTasks 不可用")
+                return {"skipped": True}
+            if getattr(self.config, "debug_logging", False):
+                counter = getattr(self.client, "get_all_tasks_count", None)
+                if counter is not None:
+                    try:
+                        self._debug("GetAllTasksCount: %s" % (counter(),))
+                    except Exception:
+                        pass
+            tsums = {}
+
+            def _tsum(task):
+                if task.id not in tsums:
+                    tsums[task.id] = TaskSummary(
+                        task_id=task.id, name=task.name, mode=task.mode)
+                return tsums[task.id]
+
+            remove_keys = []
+            touched = set()
+            timeout_secs = max(
+                1, int(self.config.pending_timeout_hours)) * 3600
+            now = time.time()
+            for state in copying:
+                task = tasks_by_id.get(state.get("task_id") or "")
+                if task is None:
                     continue
-                tsum = TaskSummary(task_id=task.id, name=task.name,
-                                   mode=task.mode)
-                self._target_cache = {}
+                tsum = _tsum(task)
+                outcome, detail, matched = self._verify_state(
+                    state, cd2_tasks)
+                if outcome == "done":
+                    self._apply_done(task, state, tsum, remove_keys,
+                                     matched)
+                    touched.add(task.id)
+                elif outcome == "failed":
+                    self._apply_failed(task, state, tsum, detail, matched)
+                    touched.add(task.id)
+                else:
+                    submitted = (state.get("submitted_at")
+                                 or state.get("first_seen_at"))
+                    if submitted and now - float(submitted) > timeout_secs:
+                        self._apply_failed(
+                            task, state, tsum,
+                            "复制超时: 已提交 %d 小时仍未完成"
+                            % (timeout_secs // 3600),
+                            None,
+                        )
+                        touched.add(task.id)
+                    else:
+                        tsum.pending += 1
+            # 失败记录复检: 远端其实已完成的, 修正为已同步
+            for state in failed_states:
+                task = tasks_by_id.get(state.get("task_id") or "")
+                if task is None:
+                    continue
+                target_dir, _ = parent_and_name(state["target_path"])
+                matched = self._find_copy_task(
+                    cd2_tasks, state["source_path"], target_dir,
+                    target_path=state["target_path"])
+                if matched is None or not matched.is_completed:
+                    continue
+                if int(getattr(matched, "failed_files", 0) or 0) > 0:
+                    continue
+                self._apply_done(task, state, _tsum(task), remove_keys,
+                                 matched)
+                touched.add(task.id)
+                self._log("失败项复检: CD2 任务已完成, 修正为已同步 "
+                          + state["source_path"])
+            if remove_keys:
                 try:
-                    self._settle_copying(task, tsum)
-                    self._recheck_failed(task, tsum)
+                    removed = self.client.remove_copy_tasks(remove_keys)
+                    self._debug("RemoveCopyTasks 清理已完成任务 %d 条"
+                                % removed)
                 except Exception as exc:
-                    self._log("快速结算异常 [%s]: %s" % (task.name, exc))
-                result[task.id] = {
-                    "verified": tsum.verified, "failed": tsum.failed,
-                    "pending": tsum.pending,
+                    self._log("清理 CD2 已完成任务失败 (不影响同步结果): "
+                              + str(exc))
+            # 积压补交: 本轮有任务腾出名额且之前扫描有暂缓文件的, 补一轮
+            for task in self.config.tasks:
+                if (task.id in touched and self._backlog.get(task.id)
+                        and task.enabled):
+                    self._target_cache = {}
+                    self._ensured_dirs = set()
+                    try:
+                        self._run_task(task)
+                    except Exception as exc:
+                        self._log("积压补交异常 [%s]: %s"
+                                  % (task.name, exc))
+            return {
+                tid: {
+                    "verified": t.verified, "failed": t.failed,
+                    "pending": t.pending,
                 }
-            return result
+                for tid, t in tsums.items()
+            }
         finally:
             self._lock.release()
 
-    def _recheck_failed(self, task, tsum):
-        """一轮结束后自动复检失败项: 以 CopyTask 状态为准。
-
-        任务其实已完成 (Completed 且 failedFiles=0) 的, 把状态修正为
-        已同步 —— 典型是目标文件被 MoviePilot 整理移走后被旧逻辑
-        误判的失败, 以及重试次数已耗尽、本来不会再被处理的项目。
-        """
-        tasks = self._copy_tasks()
-        if tasks is None:
-            return
-        for state in self.store.list_states_by_status("failed",
-                                                      task_id=task.id):
-            target_dir, _ = parent_and_name(state["target_path"])
-            ct = self._find_copy_task(tasks, state["source_path"], target_dir,
-                                      target_path=state["target_path"])
-            if ct is None or not ct.is_completed:
-                continue
-            if int(getattr(ct, "failed_files", 0) or 0) > 0:
-                continue
-            self.store.upsert_done(
-                state_key=state["state_key"],
-                task_id=task.id,
-                source_path=state["source_path"],
-                source_file_id=state.get("source_file_id") or "",
-                size=int(state.get("size") or 0),
-                check_value=state.get("check_value") or "",
-                target_path=state["target_path"],
-            )
-            self.store.finish_open_task(state["source_path"], "done",
-                                        task_id=task.id)
-            tsum.verified += 1
-            self._log("失败项复检: CD2 任务已完成, 修正为已同步 "
-                      + state["source_path"])
+    def settle_only(self):
+        """页面打开/刷新时的快速对账: 与后台轮询同一套逻辑。"""
+        return self.poll_copy_tasks()
 
     def _run_task(self, task):
         cfg = self.config
@@ -555,14 +613,19 @@ class SyncEngine:
         self._target_cache = {}
         self._ensured_dirs = set()
 
-        self._settle_copying(task, tsum)
+        self._debug(
+            "任务[%s]开始: 模式=%s 源=%s 目标=%s 并发=%d 冲突策略=%s"
+            % (task.name, task.mode, source_root, target_root,
+               max(1, int(getattr(task, "max_concurrent_sync", 1) or 1)),
+               task.conflict_policy or cfg.conflict_policy or "skip")
+        )
 
         # 本任务并发上限: 还在同步中的 + 本轮新提交的, 不超过这个数
         limit = max(1, int(getattr(task, "max_concurrent_sync", 1) or 1))
         in_flight = int(self.store.count_states(task.id).get("copying", 0))
         candidates = []
 
-        files = self._walk_source(source_root)
+        files, walk_complete = self._walk_source(source_root)
         tsum.scanned = len(files)
         seen_keys = set()
         base_policy = task.conflict_policy or cfg.conflict_policy or "skip"
@@ -573,8 +636,6 @@ class SyncEngine:
             target_dir, _ = parent_and_name(target_path)
             key = state_key_of(task.id, src.id, src.full_path)
             seen_keys.add(key)
-            if key in self._settled_keys:
-                continue
             state = self.store.get_state(key)
 
             if state and state.get("status") == "copying":
@@ -632,14 +693,17 @@ class SyncEngine:
             })
 
         self._submit_candidates(task, tsum, candidates, in_flight, limit)
+        self._backlog[task.id] = tsum.deferred > 0
+        # 本任务当前在传总数 (含往轮未完成的), 供运行摘要展示
+        tsum.pending = int(
+            self.store.count_states(task.id).get("copying", 0))
 
-        if task.mode != "backup":
-            # 备份模式只增不减: 源端消失不标记 gone
+        if task.mode != "backup" and walk_complete:
+            # 备份模式只增不减: 源端消失不标记 gone;
+            # 遍历不完整 (有目录没列出来) 时也不标记, 防误判
             tsum.gone_marked = self.store.mark_missing_as_gone(
                 seen_keys, task_id=task.id
             )
-
-        self._recheck_failed(task, tsum)
 
         self._log(
             "任务[%s|%s]完成: 扫描 %d, 跳过 %d, 复制完成 %d, 跨轮校验 %d, "
@@ -663,6 +727,10 @@ class SyncEngine:
         finally:
             self._lock.release()
 
+    def request_stop(self):
+        """插件重初始化/停止时调用: 当前任务收尾后本轮提前结束。"""
+        self._stopped = True
+
     def _run_all_locked(self, task_id=None):
         summary = SyncSummary()
         tasks = [
@@ -673,6 +741,9 @@ class SyncEngine:
             summary.skipped_run = True
             return summary
         for task in tasks:
+            if self._stopped:
+                self._log("插件重初始化, 本轮提前结束")
+                break
             try:
                 tsum = self._run_task(task)
             except Exception as exc:

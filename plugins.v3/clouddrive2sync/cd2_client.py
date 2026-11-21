@@ -19,6 +19,7 @@ RPC 和字段均已对着官方 clouddrive.proto (v1.2.0-beta) 核实:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import monotonic as _monotonic
 
 _PB2_CANDIDATES = (
     ("clouddrive_pb2", "clouddrive_pb2_grpc"),
@@ -132,16 +133,54 @@ def parent_and_name(path):
 class Cd2GrpcClient:
     """基于官方 proto 存根的真实客户端 (延迟连接)。"""
 
-    def __init__(self, address, token="", timeout=60, copy_timeout=180):
+    def __init__(self, address, token="", timeout=60, copy_timeout=180,
+                 logger=None):
         self.address = address
         self.token = token or ""
         self.timeout = timeout
         # CopyFile 是服务端提交操作: 跨盘时 CD2 要建任务/谈秒传,
         # 经常超过普通 RPC 的超时, 单独给长一点
         self.copy_timeout = copy_timeout
+        self.logger = logger
+        self.debug_logging = False
         self._channel = None
         self._stub = None
         self._pb2 = None
+
+    # ---------- 日志/错误描述 ----------
+
+    def _debug(self, msg):
+        if self.debug_logging and self.logger:
+            self.logger.info("[CloudDrive2Sync][详细] " + msg)
+
+    @staticmethod
+    def describe_error(exc):
+        """把 gRPC 异常拆成 状态码/details/debug 三段, 比原始
+        Rendezvous repr 好读得多, 排查时直接看这一行。"""
+        parts = []
+        code = None
+        try:
+            code = exc.code()
+        except Exception:
+            code = None
+        if code is not None:
+            parts.append("status=" + str(getattr(code, "name", code)))
+        details = None
+        try:
+            details = exc.details()
+        except Exception:
+            details = None
+        if details:
+            parts.append("details=" + str(details))
+        debug = getattr(exc, "debug_error_string", None)
+        if callable(debug):
+            try:
+                debug = debug()
+            except Exception:
+                debug = None
+        if debug:
+            parts.append("debug=" + str(debug))
+        return " | ".join(parts) if parts else str(exc)
 
     # ---------- 连接 ----------
 
@@ -201,7 +240,29 @@ class Cd2GrpcClient:
 
     # ---------- 业务方法 (引擎只依赖这四个) ----------
 
+    @staticmethod
+    def _is_channel_closed(exc):
+        text = str(exc)
+        return "Channel closed" in text or "CANCELLED" in text
+
     def list_sub_files(self, path, force_refresh=False):
+        started = _monotonic()
+        try:
+            files = self._list_sub_files_once(path, force_refresh)
+        except Cd2Error as exc:
+            if not self._is_channel_closed(exc):
+                self._debug("GetSubFiles %s 失败 (%.0f ms): %s"
+                            % (path, (_monotonic() - started) * 1000, exc))
+                raise
+            # 通道被关 (多为插件重初始化时旧连接被释放): 重连后重试一次
+            self._debug("GetSubFiles %s 通道已关, 重连重试" % path)
+            self.close()
+            files = self._list_sub_files_once(path, force_refresh)
+        self._debug("GetSubFiles %s -> %d 项 (%.0f ms)"
+                    % (path, len(files), (_monotonic() - started) * 1000))
+        return files
+
+    def _list_sub_files_once(self, path, force_refresh=False):
         self._connect()
         request = self._pb2.ListSubFileRequest(
             path=path, forceRefresh=bool(force_refresh)
@@ -214,7 +275,7 @@ class Cd2GrpcClient:
                 for raw in reply.subFiles:
                     files.append(self._convert(raw))
         except Exception as exc:
-            raise Cd2Error("GetSubFiles " + str(path) + " 失败: " + str(exc)) from exc
+            raise Cd2Error("GetSubFiles " + str(path) + " 失败: " + self.describe_error(exc)) from exc
         return files
 
     def find_file_by_path(self, path):
@@ -245,7 +306,7 @@ class Cd2GrpcClient:
                 request, metadata=self._metadata(), timeout=self.timeout
             )
         except Exception as exc:
-            raise Cd2Error("CreateFolder 失败: " + str(exc)) from exc
+            raise Cd2Error("CreateFolder 失败: " + self.describe_error(exc)) from exc
         result = getattr(reply, "result", None)
         if result is not None and not getattr(result, "success", True):
             raise Cd2Error(
@@ -255,6 +316,8 @@ class Cd2GrpcClient:
     def copy_file(self, source_paths, dest_path, conflict_policy="skip"):
         """跨盘复制: CD2 服务端完成, 不走本地中转。返回目标路径列表。"""
         self._connect()
+        self._debug("CopyFile %s -> %s (policy=%s)"
+                    % (list(source_paths), dest_path, conflict_policy))
         policy = _CONFLICT_POLICIES.get(str(conflict_policy).lower(), 2)
         request = self._pb2.CopyFileRequest(
             theFilePaths=list(source_paths),
@@ -266,7 +329,7 @@ class Cd2GrpcClient:
                 request, metadata=self._metadata(), timeout=self.copy_timeout
             )
         except Exception as exc:
-            raise Cd2Error("CopyFile 失败: " + str(exc)) from exc
+            raise Cd2Error("CopyFile 失败: " + self.describe_error(exc)) from exc
         if not getattr(reply, "success", False):
             raise Cd2Error(
                 "CopyFile 失败: " + str(getattr(reply, "errorMessage", "未知错误"))
@@ -280,17 +343,122 @@ class Cd2GrpcClient:
         普通删除 (进回收站/可恢复), 不用 DeleteFilePermanently。
         """
         self._connect()
+        self._debug("DeleteFile %s" % path)
         request = self._pb2.FileRequest(path=path)
         try:
             reply = self._stub.DeleteFile(
                 request, metadata=self._metadata(), timeout=self.timeout
             )
         except Exception as exc:
-            raise Cd2Error("DeleteFile 失败: " + str(exc)) from exc
+            raise Cd2Error("DeleteFile 失败: " + self.describe_error(exc)) from exc
         if not getattr(reply, "success", False):
             raise Cd2Error(
                 "DeleteFile 失败: " + str(getattr(reply, "errorMessage", "未知错误"))
             )
+
+    # ---------- 复制任务管理 (轮询对账用) ----------
+
+    def restart_copy_task(self, source_path, dest_path):
+        """重启一个失败的 CD2 复制任务 (自动重试)。
+
+        RPC: RestartCopyTask(CopyTaskRequest{sourcePath, destPath})
+        路径必须用 GetCopyTasks 返回的原始字符串, 不能自行拼凑。
+        """
+        self._connect()
+        self._debug("RestartCopyTask %s -> %s" % (source_path, dest_path))
+        request = self._pb2.CopyTaskRequest(
+            sourcePath=source_path, destPath=dest_path
+        )
+        try:
+            self._stub.RestartCopyTask(
+                request, metadata=self._metadata(), timeout=self.timeout
+            )
+        except Exception as exc:
+            raise Cd2Error(
+                "RestartCopyTask 失败: " + self.describe_error(exc)
+            ) from exc
+
+    def cancel_copy_task(self, source_path, dest_path):
+        """取消一个进行中的 CD2 复制任务。
+
+        RPC: CancelCopyTask(CopyTaskRequest{sourcePath, destPath})
+        """
+        self._connect()
+        self._debug("CancelCopyTask %s -> %s" % (source_path, dest_path))
+        request = self._pb2.CopyTaskRequest(
+            sourcePath=source_path, destPath=dest_path
+        )
+        try:
+            self._stub.CancelCopyTask(
+                request, metadata=self._metadata(), timeout=self.timeout
+            )
+        except Exception as exc:
+            raise Cd2Error(
+                "CancelCopyTask 失败: " + self.describe_error(exc)
+            ) from exc
+
+    def remove_copy_tasks(self, task_keys):
+        """按 taskKey 删除指定的 CD2 复制任务记录, 返回删除条数。
+
+        RPC: RemoveCopyTasks(CopyTaskBatchRequest{taskKeys})
+        taskKey 格式 "{sourcePath}:{destPath}", 用 GetCopyTasks 返回的
+        原始路径拼 (不要做任何归一化)。只删指定的任务, 不影响 CD2 里
+        其它已完成记录 (RemoveCompletedCopyTasks 是全清, 不用它)。
+        """
+        if not task_keys:
+            return 0
+        self._connect()
+        self._debug("RemoveCopyTasks %s" % (list(task_keys),))
+        request = self._pb2.CopyTaskBatchRequest(taskKeys=list(task_keys))
+        try:
+            reply = self._stub.RemoveCopyTasks(
+                request, metadata=self._metadata(), timeout=self.timeout
+            )
+        except Exception as exc:
+            raise Cd2Error(
+                "RemoveCopyTasks 失败: " + self.describe_error(exc)
+            ) from exc
+        if reply is not None and not getattr(reply, "success", True):
+            raise Cd2Error(
+                "RemoveCopyTasks 失败: "
+                + str(getattr(reply, "errorMessage", "未知错误"))
+            )
+        return int(getattr(reply, "affectedCount", 0) or 0)
+
+    def get_all_tasks_count(self):
+        """各类任务计数 (辅助监控/详细日志用)。
+
+        RPC: GetAllTasksCount(Empty) -> GetAllTasksCountResult
+        字段随 CD2 版本变化, 这里只做通用读取。
+        """
+        self._connect()
+        try:
+            from google.protobuf import empty_pb2
+
+            request = empty_pb2.Empty()
+        except Exception:
+            request = None
+        try:
+            if request is not None:
+                reply = self._stub.GetAllTasksCount(
+                    request, metadata=self._metadata(), timeout=self.timeout
+                )
+            else:
+                reply = self._stub.GetAllTasksCount(
+                    metadata=self._metadata(), timeout=self.timeout
+                )
+        except Exception as exc:
+            raise Cd2Error(
+                "GetAllTasksCount 失败: " + self.describe_error(exc)
+            ) from exc
+        counts = {}
+        try:
+            for field_desc, value in reply.ListFields():
+                if isinstance(value, (int, float, bool)):
+                    counts[field_desc.name] = value
+        except Exception:
+            pass
+        return counts
 
     def get_copy_tasks(self):
         """拉取 CD2 全部复制任务 (异步复制的完成状态以此为准)。
@@ -298,7 +466,26 @@ class Cd2GrpcClient:
         RPC: GetCopyTasks(google.protobuf.Empty) -> GetCopyTaskResult{copyTasks}
         CopyTask 关键字段: sourcePath, destPath, status, totalBytes,
         uploadedBytes, totalFiles, uploadedFiles, failedFiles, errors。
+        通道被关时自动重连重试一次。
         """
+        try:
+            tasks = self._get_copy_tasks_once()
+        except Cd2Error as exc:
+            if not self._is_channel_closed(exc):
+                raise
+            self.close()
+            tasks = self._get_copy_tasks_once()
+        if self.debug_logging:
+            brief = "; ".join(
+                "%s -> %s [%s %d/%d 失败%d]"
+                % (t.source_path, t.dest_path, t.status_name,
+                   t.uploaded_files, t.total_files, t.failed_files)
+                for t in tasks[:10]
+            ) or "(空)"
+            self._debug("GetCopyTasks -> %d 个任务: %s" % (len(tasks), brief))
+        return tasks
+
+    def _get_copy_tasks_once(self):
         self._connect()
         try:
             from google.protobuf import empty_pb2
@@ -316,7 +503,7 @@ class Cd2GrpcClient:
                     metadata=self._metadata(), timeout=self.timeout
                 )
         except Exception as exc:
-            raise Cd2Error("GetCopyTasks 失败: " + str(exc)) from exc
+            raise Cd2Error("GetCopyTasks 失败: " + self.describe_error(exc)) from exc
         tasks = []
         for raw in getattr(reply, "copyTasks", []) or []:
             errors = []

@@ -129,7 +129,7 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card_title, null, {
-          default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
+          default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
             _createTextVNode("连接与全局设置", -1)
           ]))]),
           _: 1
@@ -173,12 +173,27 @@ return (_ctx, _cache) => {
                   md: "3"
                 }, {
                   default: _withCtx(() => [
+                    _createVNode(_component_v_switch, {
+                      modelValue: config.value.debug_logging,
+                      "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((config.value.debug_logging) = $event)),
+                      label: "详细日志",
+                      color: "primary",
+                      "hide-details": ""
+                    }, null, 8, ["modelValue"])
+                  ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, {
+                  cols: "12",
+                  md: "3"
+                }, {
+                  default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.interval_minutes,
-                      "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((config.value.interval_minutes) = $event)),
+                      "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((config.value.interval_minutes) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
-                      label: "轮询间隔 (分钟)",
+                      label: "扫描间隔 (分钟)",
                       hint: "所有任务共用这个周期",
                       "persistent-hint": ""
                     }, null, 8, ["modelValue"])
@@ -191,8 +206,25 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
+                      modelValue: config.value.copy_poll_interval_seconds,
+                      "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((config.value.copy_poll_interval_seconds) = $event)),
+                      modelModifiers: { number: true },
+                      type: "number",
+                      label: "复制任务轮询间隔 (秒)",
+                      hint: "后台拉取 CD2 任务状态对账的间隔",
+                      "persistent-hint": ""
+                    }, null, 8, ["modelValue"])
+                  ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, {
+                  cols: "12",
+                  md: "3"
+                }, {
+                  default: _withCtx(() => [
+                    _createVNode(_component_v_text_field, {
                       modelValue: config.value.max_retries,
-                      "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((config.value.max_retries) = $event)),
+                      "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((config.value.max_retries) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "失败最大重试次数"
@@ -207,7 +239,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.cd2_address,
-                      "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((config.value.cd2_address) = $event)),
+                      "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.value.cd2_address) = $event)),
                       label: "CloudDrive2 gRPC 地址",
                       placeholder: "127.0.0.1:19798",
                       hint: "CD2 的 gRPC 监听地址, 默认端口 19798",
@@ -223,7 +255,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.cd2_token,
-                      "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((config.value.cd2_token) = $event)),
+                      "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((config.value.cd2_token) = $event)),
                       type: "password",
                       label: "API Token",
                       hint: "在 CloudDrive2 设置中创建；移动模式需要删除权限",
@@ -242,7 +274,7 @@ return (_ctx, _cache) => {
       _: 1
     }),
     _createElementVNode("div", _hoisted_2, [
-      _cache[17] || (_cache[17] = _createElementVNode("span", { class: "text-h6" }, "任务列表", -1)),
+      _cache[19] || (_cache[19] = _createElementVNode("span", { class: "text-h6" }, "任务列表", -1)),
       _createVNode(_component_v_spacer),
       _createVNode(_component_v_btn, {
         color: "primary",
@@ -250,7 +282,7 @@ return (_ctx, _cache) => {
         "prepend-icon": "mdi-plus",
         onClick: addTask
       }, {
-        default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+        default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
           _createTextVNode("新增任务", -1)
         ]))]),
         _: 1
@@ -261,7 +293,7 @@ return (_ctx, _cache) => {
       variant: "tonal",
       class: "mb-4"
     }, {
-      default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+      default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
         _createTextVNode(" 每个任务是一组独立的「源目录 → 目标目录」，有自己的模式和同步状态，互不影响。 复制是异步的：提交后先显示同步中，后续轮次自动结算，不会误判失败。 ", -1)
       ]))]),
       _: 1
@@ -424,7 +456,7 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card_title, null, {
-          default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+          default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
             _createTextVNode("异步校验与记录清理（全局）", -1)
           ]))]),
           _: 1
@@ -440,7 +472,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.verify_wait_seconds,
-                      "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.value.verify_wait_seconds) = $event)),
+                      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.value.verify_wait_seconds) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "提交后本轮等待 (秒)",
@@ -457,7 +489,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.verify_interval_seconds,
-                      "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((config.value.verify_interval_seconds) = $event)),
+                      "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.value.verify_interval_seconds) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "等待时轮询间隔 (秒)"
@@ -472,7 +504,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.pending_timeout_hours,
-                      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.value.pending_timeout_hours) = $event)),
+                      "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.value.pending_timeout_hours) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "同步中超时判失败 (小时)"
@@ -487,7 +519,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.copy_timeout_seconds,
-                      "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.value.copy_timeout_seconds) = $event)),
+                      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.value.copy_timeout_seconds) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "提交复制超时 (秒)",
@@ -504,7 +536,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.history_retention_days,
-                      "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.value.history_retention_days) = $event)),
+                      "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.history_retention_days) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "成功历史保留 (天)"
@@ -519,7 +551,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.failed_retention_days,
-                      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.value.failed_retention_days) = $event)),
+                      "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.failed_retention_days) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "失败历史保留 (天)"
@@ -534,7 +566,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createVNode(_component_v_text_field, {
                       modelValue: config.value.state_tombstone_days,
-                      "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.state_tombstone_days) = $event)),
+                      "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.value.state_tombstone_days) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       label: "源文件消失后宽限 (天)",
@@ -556,18 +588,18 @@ return (_ctx, _cache) => {
     _createElementVNode("div", _hoisted_4, [
       _createVNode(_component_v_btn, {
         variant: "text",
-        onClick: _cache[13] || (_cache[13] = $event => (emit('switch')))
+        onClick: _cache[15] || (_cache[15] = $event => (emit('switch')))
       }, {
-        default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+        default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
           _createTextVNode("查看任务", -1)
         ]))]),
         _: 1
       }),
       _createVNode(_component_v_btn, {
         variant: "text",
-        onClick: _cache[14] || (_cache[14] = $event => (emit('close')))
+        onClick: _cache[16] || (_cache[16] = $event => (emit('close')))
       }, {
-        default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
+        default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
           _createTextVNode("关闭", -1)
         ]))]),
         _: 1
@@ -576,7 +608,7 @@ return (_ctx, _cache) => {
         color: "primary",
         onClick: saveConfig
       }, {
-        default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
+        default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
           _createTextVNode("保存", -1)
         ]))]),
         _: 1

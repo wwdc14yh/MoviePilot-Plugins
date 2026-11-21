@@ -123,6 +123,7 @@ function openGlobal() {
       cd2_address: cfg.cd2_address || '127.0.0.1:19798',
       cd2_token: cfg.cd2_token || '',
       interval_minutes: cfg.interval_minutes ?? 30,
+      copy_poll_interval_seconds: cfg.copy_poll_interval_seconds ?? 10,
       max_retries: cfg.max_retries ?? 5,
       verify_wait_seconds: cfg.verify_wait_seconds ?? 30,
       verify_interval_seconds: cfg.verify_interval_seconds ?? 5,
@@ -131,6 +132,7 @@ function openGlobal() {
       history_retention_days: cfg.history_retention_days ?? 30,
       failed_retention_days: cfg.failed_retention_days ?? 90,
       state_tombstone_days: cfg.state_tombstone_days ?? 30,
+      debug_logging: !!cfg.debug_logging,
     },
   }
 }
@@ -588,7 +590,11 @@ onUnmounted(() => {
             </v-col>
             <v-col cols="6" md="4">
               <v-text-field v-model.number="globalDialog.form.interval_minutes"
-                type="number" label="定时间隔 (分钟)" />
+                type="number" label="扫描间隔 (分钟)" />
+            </v-col>
+            <v-col cols="6" md="4">
+              <v-text-field v-model.number="globalDialog.form.copy_poll_interval_seconds"
+                type="number" label="复制任务轮询间隔 (秒)" />
             </v-col>
             <v-col cols="6" md="4">
               <v-text-field v-model.number="globalDialog.form.max_retries"
@@ -621,6 +627,10 @@ onUnmounted(() => {
             <v-col cols="6" md="4">
               <v-text-field v-model.number="globalDialog.form.state_tombstone_days"
                 type="number" label="源消失宽限 (天)" />
+            </v-col>
+            <v-col cols="12">
+              <v-switch v-model="globalDialog.form.debug_logging" color="primary"
+                hide-details label="详细日志 (排查问题时打开, 会记录每次 CD2 调用的路径/耗时/任务列表)" />
             </v-col>
           </v-row>
         </v-card-text>

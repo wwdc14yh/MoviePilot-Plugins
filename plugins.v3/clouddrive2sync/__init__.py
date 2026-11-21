@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.4.7"
+    plugin_version = "0.5.1"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -111,7 +111,9 @@ class CloudDrive2Sync(_PluginBase):
             self._config.cd2_address,
             token=self._config.cd2_token,
             copy_timeout=max(30, int(self._config.copy_timeout_seconds or 180)),
+            logger=logger,
         )
+        self._client.debug_logging = bool(self._config.debug_logging)
         self._engine = SyncEngine(self._store, self._client, self._config,
                                   logger=logger)
         if self._config.onlyonce:
@@ -143,18 +145,35 @@ class CloudDrive2Sync(_PluginBase):
         return bool(self._config and self._config.enabled)
 
     def stop_service(self) -> None:
-        """释放客户端和数据库连接; 可重复调用。"""
-        if self._client is not None:
+        """释放客户端和数据库连接; 可重复调用。
+
+        若正好有一轮同步在跑, 先通知引擎收尾并短暂等待 (最多 3 秒),
+        避免在跑的轮次被硬关连接/通道打断; 等不到也不强等 ——
+        存储层会自动重开连接, 客户端通道关闭会自动重连重试。
+        """
+        engine = self._engine
+        acquired = False
+        if engine is not None:
             try:
-                self._client.close()
-            finally:
-                self._client = None
-        if self._store is not None:
-            try:
-                self._store.close()
-            finally:
-                self._store = None
-        self._engine = None
+                engine.request_stop()
+                acquired = engine._lock.acquire(timeout=3)
+            except Exception:
+                acquired = False
+        try:
+            if self._client is not None:
+                try:
+                    self._client.close()
+                finally:
+                    self._client = None
+            if self._store is not None:
+                try:
+                    self._store.close()
+                finally:
+                    self._store = None
+            self._engine = None
+        finally:
+            if acquired and engine is not None:
+                engine._lock.release()
 
     # ---------- 同步入口 ----------
 
@@ -203,8 +222,26 @@ class CloudDrive2Sync(_PluginBase):
                 ),
                 "func": self.run_sync,
                 "kwargs": {},
-            }
+            },
+            {
+                "id": "CloudDrive2Sync.Poll",
+                "name": "CloudDrive2 复制任务状态轮询对账",
+                "trigger": IntervalTrigger(
+                    seconds=max(
+                        5, int(self._config.copy_poll_interval_seconds
+                               or 10)
+                    )
+                ),
+                "func": self.run_poll,
+                "kwargs": {},
+            },
         ]
+
+    def run_poll(self):
+        """后台轮询对账入口 (宿主调度器周期调用, 间隔读全局配置)。"""
+        if self._engine is None:
+            return {"skipped": True, "reason": "plugin not initialized"}
+        return self._engine.poll_copy_tasks()
 
     # ---------- 远程命令 ----------
 
@@ -449,10 +486,23 @@ class CloudDrive2Sync(_PluginBase):
     # ---------- 任务增删改 (总览页直接操作, 不绕配置页) ----------
 
     def _persist_config(self):
-        """把当前配置落盘并重新初始化插件 (任务列表以此为准)。"""
+        """把当前配置落盘并重新初始化插件 (任务列表以此为准)。
+
+        返回 {"ok": bool, "error": str}; 失败原因要回给前端,
+        不能让异常冒成 500 只显示一句"失败"。
+        """
         saved = self._config.to_dict()
-        self.update_config(saved)
-        self.init_plugin(saved)
+        try:
+            self.update_config(saved)
+        except Exception as exc:
+            logger.error("[CloudDrive2Sync] 保存配置失败: %s", exc)
+            return {"ok": False, "error": "保存配置失败: " + str(exc)}
+        try:
+            self.init_plugin(saved)
+        except Exception as exc:
+            logger.error("[CloudDrive2Sync] 重新初始化失败: %s", exc)
+            return {"ok": False, "error": "配置已保存, 但重新初始化失败: " + str(exc)}
+        return {"ok": True}
 
     def api_save_task(self, id: str = "", name: str = "", enabled: bool = True,
                       mode: str = "sync", source_path: str = "",
@@ -489,7 +539,9 @@ class CloudDrive2Sync(_PluginBase):
 
             new_task.id = _uuid.uuid4().hex[:12]
             self._config.tasks.append(new_task)
-        self._persist_config()
+        res = self._persist_config()
+        if not res.get("ok"):
+            return res
         return {"ok": True, "task": new_task.to_dict(), "created": not replaced}
 
     def api_delete_task(self, task_id: str = ""):
@@ -501,8 +553,31 @@ class CloudDrive2Sync(_PluginBase):
         ]
         if len(self._config.tasks) == before:
             return {"ok": False, "error": "任务不存在"}
-        self._persist_config()
-        return {"ok": True}
+        # 先取消该任务在 CD2 里进行中的复制任务 (按需用 CancelCopyTask)
+        if self._store is not None and self._client is not None:
+            try:
+                from .cd2_client import parent_and_name as _pan
+
+                for st in self._store.list_states_by_status(
+                        "copying", task_id=task_id):
+                    tdir, _ = _pan(st["target_path"])
+                    try:
+                        self._client.cancel_copy_task(
+                            st["source_path"], tdir)
+                    except Exception as exc:
+                        logger.info(
+                            "[CloudDrive2Sync] 取消复制任务失败 %s: %s",
+                            st["source_path"], exc)
+            except Exception as exc:
+                logger.info("[CloudDrive2Sync] 删除任务时取消复制失败: %s",
+                            exc)
+        # 连带清掉该任务的同步状态与历史记录 (已传到目标端的文件不删)
+        if self._store is not None:
+            try:
+                self._store.purge_task(task_id)
+            except Exception as exc:
+                logger.error("[CloudDrive2Sync] 清理任务记录失败: %s", exc)
+        return self._persist_config()
 
     def api_save_global(self, enabled: bool = None, cd2_address: str = None,
                         cd2_token: str = None, interval_minutes: int = None,
@@ -514,7 +589,9 @@ class CloudDrive2Sync(_PluginBase):
                         history_retention_days: int = None,
                         failed_retention_days: int = None,
                         state_tombstone_days: int = None,
-                        onlyonce: bool = None):
+                        onlyonce: bool = None,
+                        debug_logging: bool = None,
+                        copy_poll_interval_seconds: int = None):
         """保存全局设置: 只合并传入的全局字段, 任务列表原样保留。
 
         参数必须是显式标量 (原因同 api_save_task: FastAPI 校验)。
@@ -532,6 +609,8 @@ class CloudDrive2Sync(_PluginBase):
             "failed_retention_days": failed_retention_days,
             "state_tombstone_days": state_tombstone_days,
             "onlyonce": onlyonce,
+            "debug_logging": debug_logging,
+            "copy_poll_interval_seconds": copy_poll_interval_seconds,
         }
         payload = {k: v for k, v in payload.items() if v is not None}
         if self._config is None:
@@ -543,7 +622,9 @@ class CloudDrive2Sync(_PluginBase):
             if key in payload:
                 data[key] = payload[key]
         self._config = SyncConfig.from_dict(data)
-        self._persist_config()
+        res = self._persist_config()
+        if not res.get("ok"):
+            return res
         return {"ok": True, "config": self._config.to_dict()}
 
     # ---------- 配置表单 ----------
@@ -651,8 +732,16 @@ class CloudDrive2Sync(_PluginBase):
                             col(
                                 text(
                                     "interval_minutes",
-                                    "轮询间隔 (分钟)",
-                                    hint="每隔多久扫描一次源目录并结算未完成的复制",
+                                    "扫描间隔 (分钟)",
+                                    hint="每隔多久扫描一次源目录并提交新的复制任务",
+                                    type_="number",
+                                )
+                            ),
+                            col(
+                                text(
+                                    "copy_poll_interval_seconds",
+                                    "复制任务轮询间隔 (秒)",
+                                    hint="后台多久拉一次 CD2 复制任务状态与本地对账",
                                     type_="number",
                                 )
                             ),

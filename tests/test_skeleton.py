@@ -46,6 +46,10 @@ class FakeCd2Client:
         self.deleted = []
         self.policies = []
         self.deadline_sources = set()
+        self.fail_dirs = set()
+        self.restarted = []
+        self.cancelled = []
+        self.removed_keys = []
 
     def delete_file(self, path):
         self.deleted.append(path)
@@ -59,6 +63,39 @@ class FakeCd2Client:
 
     def get_copy_tasks(self):
         return list(self.copy_tasks)
+
+    def restart_copy_task(self, source_path, dest_path):
+        self.restarted.append((source_path, dest_path))
+        for task in self.copy_tasks:
+            if (task.source_path == source_path
+                    and task.dest_path == dest_path
+                    and task.status == 4):
+                task.status = 0
+                task.errors = []
+
+    def cancel_copy_task(self, source_path, dest_path):
+        self.cancelled.append((source_path, dest_path))
+        self.copy_tasks = [
+            t for t in self.copy_tasks
+            if not (t.source_path == source_path
+                    and t.dest_path == dest_path)
+        ]
+
+    def remove_copy_tasks(self, task_keys):
+        keys = set(task_keys)
+        self.removed_keys.extend(sorted(keys))
+        before = len(self.copy_tasks)
+        self.copy_tasks = [
+            t for t in self.copy_tasks
+            if "%s:%s" % (t.source_path, t.dest_path) not in keys
+        ]
+        return before - len(self.copy_tasks)
+
+    def get_all_tasks_count(self):
+        return {"copyTaskCount": len(self.copy_tasks)}
+
+    def close(self):
+        pass
 
     def complete_tasks(self):
         for task in self.copy_tasks:
@@ -92,6 +129,8 @@ class FakeCd2Client:
         return f
 
     def list_sub_files(self, path, force_refresh=False):
+        if path in self.fail_dirs:
+            raise Cd2Error("模拟目录列举失败: " + path)
         if path not in self.dirs:
             raise Cd2Error("目录不存在: " + path)
         out = []
@@ -172,12 +211,17 @@ def seed(fake):
     fake.add_file("A/Season 1/ep2.mkv", size=300, check="sha1:3", fid="f3")
 
 
+
 def test_first_run_copies_all(tmp_path):
+    """新架构: 扫描轮次只提交 (状态 copying), 完成由轮询对账落地。"""
     fake = FakeCd2Client()
     seed(fake)
     engine, store = make_engine(tmp_path, fake)
     s = engine.run_once()
-    assert (s.scanned, s.copied, s.failed) == (3, 3, 0)
+    assert (s.scanned, s.failed) == (3, 0)
+    assert store.count_states().get("copying") == 3
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 3
     tasks = store.list_tasks()
     assert len(tasks) == 3 and all(t["status"] == "done" for t in tasks)
     assert "/B/Season 1/ep1.mkv" in fake.files
@@ -188,6 +232,7 @@ def test_second_run_skips_all(tmp_path):
     seed(fake)
     engine, store = make_engine(tmp_path, fake)
     engine.run_once()
+    engine.poll_copy_tasks()
     calls = fake.copy_calls
     s = engine.run_once()
     assert (s.skipped, s.copied) == (3, 0)
@@ -199,19 +244,27 @@ def test_changed_file_recopied(tmp_path):
     seed(fake)
     engine, store = make_engine(tmp_path, fake)
     engine.run_once()
+    engine.poll_copy_tasks()
     fake.files["/A/movie1.mkv"].size = 101
     fake.files["/A/movie1.mkv"].check_value = "sha1:changed"
+    calls = fake.copy_calls
     s = engine.run_once()
-    assert (s.copied, s.skipped) == (1, 2)
+    assert s.skipped == 2 and fake.copy_calls == calls + 1
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 3
 
 
 def test_failure_retries_then_defers(tmp_path):
+    """提交期失败 (CopyFile 直接报错): 记失败并跨轮重试,
+    达到 max_retries 后暂缓, 不再提交。"""
     fake = FakeCd2Client()
     seed(fake)
     fake.fail_sources.add("/A/movie1.mkv")
     engine, store = make_engine(tmp_path, fake, max_retries=2)
     s1 = engine.run_once()
-    assert s1.failed == 1 and s1.copied == 2
+    assert s1.failed == 1
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 2
     s2 = engine.run_once()
     assert s2.failed == 1
     s3 = engine.run_once()
@@ -223,6 +276,7 @@ def test_missing_source_marked_gone_and_cleanup(tmp_path):
     seed(fake)
     engine, store = make_engine(tmp_path, fake)
     engine.run_once()
+    engine.poll_copy_tasks()
     del fake.files["/A/movie1.mkv"]
     s = engine.run_once()
     assert s.gone_marked == 1
@@ -232,7 +286,6 @@ def test_missing_source_marked_gone_and_cleanup(tmp_path):
                             state_tombstone_days=30, now=future)
     assert cleaned["states_gone"] == 1
     assert cleaned["tasks_done"] == 3
-
 
 def test_run_skip_when_locked(tmp_path):
     fake = FakeCd2Client()
@@ -246,8 +299,9 @@ def test_run_skip_when_locked(tmp_path):
     assert s.skipped_run is True
 
 
+
 def test_async_copy_pending_then_verified_next_run(tmp_path):
-    """真实 CD2 是异步复制: 第一轮只能 pending, 不能误判失败。"""
+    """真实 CD2 是异步复制: 扫描后只能是同步中, 轮询对账才落地完成。"""
     fake = FakeCd2Client()
     seed(fake)
     fake.async_mode = True
@@ -259,8 +313,9 @@ def test_async_copy_pending_then_verified_next_run(tmp_path):
     assert store.count_states().get("copying") == 3
     assert all(t["status"] == "syncing" for t in store.list_tasks())
     fake.complete_tasks()
-    s2 = engine.run_once()
-    assert s2.verified == 3 and s2.pending == 0 and s2.failed == 0
+    res = engine.poll_copy_tasks()
+    total_verified = sum(v["verified"] for v in res.values())
+    assert total_verified == 3
     assert fake.copy_calls == 3  # 没有重复提交
     assert store.count_states().get("done") == 3
     assert all(t["status"] == "done" for t in store.list_tasks())
@@ -269,16 +324,24 @@ def test_async_copy_pending_then_verified_next_run(tmp_path):
 
 
 def test_async_task_failed_records_failure(tmp_path):
+    """远端任务失败: 对账记失败并自动重启; 重试耗尽后停在失败。"""
     fake = FakeCd2Client()
     seed(fake)
     fake.async_mode = True
-    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0,
+                                max_retries=1)
     engine.run_once()
     fake.fail_tasks()
-    s = engine.run_once()
-    assert s.failed == 3
+    engine.poll_copy_tasks()
+    # 第 1 次失败: 记了失败 (历史行), 且已自动重启, 状态回到同步中
+    assert len(fake.restarted) == 3
+    assert store.count_states().get("copying") == 3
+    assert any(t["status"] == "failed" for t in store.list_tasks())
+    fake.fail_tasks()
+    engine.poll_copy_tasks()
+    # 第 2 次失败超过 max_retries=1: 不再重启, 停在失败
+    assert len(fake.restarted) == 3
     assert store.count_states().get("failed") == 3
-    assert all(t["status"] == "failed" for t in store.list_tasks())
 
 
 def test_multi_task_isolation(tmp_path):
@@ -301,6 +364,7 @@ def test_multi_task_isolation(tmp_path):
     engine = SyncEngine(store, fake, cfg)
     s = engine.run_once()
     assert s.failed == 0 and len(s.tasks) == 2
+    engine.poll_copy_tasks()
     assert store.count_states("t1").get("done") == 3
     assert store.count_states("t2").get("done") == 3
     assert "/C/movie1.mkv" in fake.files
@@ -322,8 +386,9 @@ def test_move_mode_deletes_source_after_verify(tmp_path):
     for t in cfg.tasks:
         t.max_concurrent_sync = 99
     engine = SyncEngine(store, fake, cfg)
-    s = engine.run_once()
-    assert s.copied == 3 and s.moved == 3 and s.failed == 0
+    engine.run_once()
+    engine.poll_copy_tasks()
+    # 直接验最终状态: 源被删, 目标就位
     assert "/A/movie1.mkv" not in fake.files
     assert "/B/movie1.mkv" in fake.files
     assert "/A/Season 1" not in fake.dirs  # 空目录被清理
@@ -333,7 +398,7 @@ def test_move_mode_deletes_source_after_verify(tmp_path):
 
 
 def test_move_mode_async_pending_keeps_source(tmp_path):
-    """异步未完成时绝不删源; 完成结算后才删。"""
+    """异步未完成时绝不删源; 轮询对账确认完成后才删。"""
     fake = FakeCd2Client()
     seed(fake)
     fake.async_mode = True
@@ -349,10 +414,12 @@ def test_move_mode_async_pending_keeps_source(tmp_path):
     s1 = engine.run_once()
     assert s1.pending == 3 and s1.moved == 0
     assert "/A/movie1.mkv" in fake.files
+    engine.poll_copy_tasks()  # 远端还没完成: 不删源
+    assert "/A/movie1.mkv" in fake.files
     fake.complete_tasks()
-    s2 = engine.run_once()
-    assert s2.verified == 3 and s2.moved == 3
+    engine.poll_copy_tasks()
     assert "/A/movie1.mkv" not in fake.files
+    assert store.count_states("mv") == {}
 
 
 def test_backup_mode_rename_on_change_and_no_gone(tmp_path):
@@ -368,17 +435,18 @@ def test_backup_mode_rename_on_change_and_no_gone(tmp_path):
         t.max_concurrent_sync = 99
     engine = SyncEngine(store, fake, cfg)
     engine.run_once()
+    engine.poll_copy_tasks()
     # 源文件变化: 备份模式应以 rename 策略复制新版, 保留旧版
     fake.add_file("A/movie1.mkv", size=111, check="sha1:1b", fid="f1")
     fake.policies.clear()
     engine.run_once()
     assert "rename" in fake.policies
+    engine.poll_copy_tasks()
     # 源文件消失: 备份模式不标记 gone
     del fake.files["/A/movie1.mkv"]
     s = engine.run_once()
     assert s.gone_marked == 0
     assert store.count_states("bk").get("done") == 3
-
 
 def test_config_legacy_migration_and_tasks_parse(tmp_path):
     cfg = SyncConfig.from_dict({"source_path": "/A", "target_path": "/B"})
@@ -482,8 +550,9 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.4.7"
+    assert plugin.plugin_version == "0.5.1"
     plugin.stop_service()
+
 
 
 def test_excluded_file_skipped_and_listing(tmp_path):
@@ -491,6 +560,7 @@ def test_excluded_file_skipped_and_listing(tmp_path):
     seed(fake)
     engine, store = make_engine(tmp_path, fake)
     engine.run_once()
+    engine.poll_copy_tasks()
     task_id = engine.config.tasks[0].id
     rows = store.list_states(task_id=task_id, status="done")
     assert len(rows) == 3
@@ -501,7 +571,6 @@ def test_excluded_file_skipped_and_listing(tmp_path):
     s = engine.run_once()
     assert fake.copy_calls == 0  # 排除的文件不再提交, 其余走跳过
     assert store.get_state(key)["status"] == "excluded"
-
 
 def test_save_and_delete_task_api(tmp_path):
     spec = importlib.util.spec_from_file_location(
@@ -539,8 +608,9 @@ def test_save_and_delete_task_api(tmp_path):
     plugin.stop_service()
 
 
+
 def test_copy_submit_deadline_becomes_pending_not_failed(tmp_path):
-    """CopyFile 提交超时: 服务端可能已接单, 应转 copying 跨轮校验。"""
+    """CopyFile 提交超时: 服务端可能已接单, 应转 copying 由轮询对账。"""
     fake = FakeCd2Client()
     seed(fake)
     fake.deadline_sources = {
@@ -551,10 +621,10 @@ def test_copy_submit_deadline_becomes_pending_not_failed(tmp_path):
     assert s1.failed == 0 and s1.pending == 3
     assert store.count_states().get("copying") == 3
     fake.complete_tasks()
-    s2 = engine.run_once()
-    assert s2.verified == 3 and s2.failed == 0
+    res = engine.poll_copy_tasks()
+    total_verified = sum(v["verified"] for v in res.values())
+    assert total_verified == 3
     assert fake.copy_calls == 3  # 没有重复提交
-
 
 def test_files_pagination_and_save_global(tmp_path):
     spec = importlib.util.spec_from_file_location(
@@ -598,6 +668,7 @@ def test_files_pagination_and_save_global(tmp_path):
     plugin.stop_service()
 
 
+
 def test_target_moved_away_still_done_and_not_recopied(tmp_path):
     """目标文件被 MoviePilot 整理移走后: 不判失败, 也不重复复制。"""
     fake = FakeCd2Client()
@@ -606,8 +677,9 @@ def test_target_moved_away_still_done_and_not_recopied(tmp_path):
     engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
     engine.run_once()
     fake.complete_tasks()
-    s2 = engine.run_once()
-    assert s2.verified == 3
+    res = engine.poll_copy_tasks()
+    total_verified = sum(v["verified"] for v in res.values())
+    assert total_verified == 3
     # 模拟整理: 目标文件全部移走
     for path in list(fake.files):
         if path.startswith("/B/"):
@@ -618,7 +690,7 @@ def test_target_moved_away_still_done_and_not_recopied(tmp_path):
 
 
 def test_failed_recheck_fixed_by_completed_task(tmp_path):
-    """一轮结束后自动复检失败项: CD2 任务已完成的修正为已同步,
+    """轮询对账复检失败项: CD2 任务已完成的修正为已同步,
     包括重试次数已耗尽的项目, 且不重新提交复制。"""
     fake = FakeCd2Client()
     seed(fake)
@@ -635,12 +707,13 @@ def test_failed_recheck_fixed_by_completed_task(tmp_path):
     fake.copy_tasks.append(cd2_mod.Cd2CopyTask(
         source_path="/A/movie1.mkv", dest_path="/B", status=3,
         total_files=1, uploaded_files=1, failed_files=0))
-    summary = engine.run_once()
+    engine.run_once()
+    res = engine.poll_copy_tasks()
     state = store.get_state(key)
     assert state["status"] == "done"
-    assert summary.tasks[0]["verified"] >= 1
+    total_verified = sum(v["verified"] for v in res.values())
+    assert total_verified >= 1
     assert fake.copy_calls == 2  # 只有另外两个文件被正常复制
-
 
 def test_api_signatures_fastapi_safe(tmp_path):
     """宿主把插件 API 注册为 FastAPI 路由: 端点签名里不能有
@@ -660,8 +733,10 @@ def test_api_signatures_fastapi_safe(tmp_path):
             assert param.annotation is not dict, api["path"]
 
 
+
 def test_per_task_concurrency_limit(tmp_path):
-    """每任务并发上限: 默认每轮只同时进行 N 个文件, 完成一个才补一个。"""
+    """每任务并发上限: 同时在传不超过 N 个; 对账完成一个, 下一轮
+    扫描才补一个 (或由积压补交在对账后立即补)。"""
     fake = FakeCd2Client()
     fake.async_mode = True
     seed(fake)
@@ -671,14 +746,15 @@ def test_per_task_concurrency_limit(tmp_path):
     s1 = engine.run_once()
     assert s1.pending == 1 and fake.copy_calls == 1
     fake.complete_tasks()
-    s2 = engine.run_once()
-    assert s2.verified == 1 and s2.pending == 1 and fake.copy_calls == 2
+    engine.poll_copy_tasks()  # 对账完成第 1 个 + 积压补交第 2 个
+    assert store.count_states().get("done") == 1
+    assert fake.copy_calls == 2
     fake.complete_tasks()
-    s3 = engine.run_once()
-    assert s3.verified == 1 and s3.pending == 1 and fake.copy_calls == 3
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 2
+    assert fake.copy_calls == 3
     fake.complete_tasks()
-    s4 = engine.run_once()
-    assert s4.verified == 1 and s4.pending == 0
+    engine.poll_copy_tasks()
     assert store.count_states().get("done") == 3
 
     # 上限为 2 时, 第一轮同时进行 2 个
@@ -692,16 +768,20 @@ def test_per_task_concurrency_limit(tmp_path):
 
 
 def test_concurrency_slot_refills_within_round(tmp_path):
-    """上限 1 但文件秒传完成时: 名额当轮腾出, 一轮内依次传完所有文件,
-    而不是一个文件等一轮。"""
-    fake = FakeCd2Client()  # 同步模式: 提交即完成
+    """上限 1 但文件秒传: 对账腾出名额后积压补交立即跟上,
+    不用等下一轮定时扫描就能依次传完。"""
+    fake = FakeCd2Client()  # 同步模式: 提交即在 CD2 端完成
     seed(fake)
     engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
     engine.config.tasks[0].max_concurrent_sync = 1
     s = engine.run_once()
-    assert s.copied == 3 and fake.copy_calls == 3
+    assert fake.copy_calls == 1  # 只提交了 1 个, 其余暂缓
+    for _ in range(5):
+        engine.poll_copy_tasks()
+        if store.count_states().get("done") == 3:
+            break
+    assert fake.copy_calls == 3
     assert store.count_states().get("done") == 3
-
 
 def test_settle_only_and_dest_fullpath_match(tmp_path):
     """快速结算: 不跑整轮也能把同步中结算为已同步;
@@ -720,3 +800,205 @@ def test_settle_only_and_dest_fullpath_match(tmp_path):
     assert store.count_states().get("done") == 3
     total_verified = sum(v["verified"] for v in res.values())
     assert total_verified == 3
+
+
+def test_store_reopen_after_close(tmp_path):
+    """连接被 close 后操作自动重开 (重初始化与在跑轮次并发时不报
+    Cannot operate on a closed database), purge_task 连带清状态。"""
+    store = store_mod.SyncStore(tmp_path / "x.db")
+    store.upsert_done(
+        state_key="k1", task_id="t1", source_path="/A/a.mkv",
+        source_file_id="f1", size=1, check_value="h",
+        target_path="/B/a.mkv")
+    store.close()
+    assert store.get_state("k1")["status"] == "done"
+    store.upsert_copying(
+        state_key="k2", task_id="t1", source_path="/A/b.mkv",
+        source_file_id="f2", size=2, check_value="h2",
+        target_path="/B/b.mkv")
+    assert store.count_states().get("copying") == 1
+    store.purge_task("t1")
+    assert store.count_states() == {}
+    store.close()
+
+
+def test_delete_task_purges_states(tmp_path):
+    """删除任务: 配置里去掉 + 状态记录连带清理, 其它任务不受影响;
+    删除时正好有一轮在跑 (引擎锁被占用) 也不能失败。"""
+    import threading
+
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_del", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_del"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    saved = {}
+    plugin.update_config = lambda cfg: saved.update(cfg) or True
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "t1", "name": "任务一", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"},
+        {"id": "t2", "name": "任务二", "mode": "sync",
+         "source_path": "/C", "target_path": "/D"}]})
+    store = plugin._store
+    for tid in ("t1", "t2"):
+        store.upsert_done(
+            state_key=store_mod.state_key_of(tid, "f1", "/A/a.mkv"),
+            task_id=tid, source_path="/A/a.mkv", source_file_id="f1",
+            size=1, check_value="h", target_path="/B/a.mkv")
+    # 模拟一轮正在跑: 占住引擎锁, 删除在另一线程执行
+    plugin._engine._lock.acquire()
+    result = {}
+
+    def do_delete():
+        result.update(plugin.api_delete_task(task_id="t1"))
+
+    th = threading.Thread(target=do_delete)
+    th.start()
+    threading.Event().wait(0.5)
+    plugin._engine._lock.release()
+    th.join(timeout=10)
+    assert result.get("ok"), result
+    assert [t.id for t in plugin._config.tasks] == ["t2"]
+    assert plugin._store.count_states("t1") == {}
+    assert plugin._store.count_states("t2").get("done") == 1
+    plugin.stop_service()
+
+
+
+def test_walk_skips_bad_subdir_and_root_failure(tmp_path):
+    """子目录列举失败 (如 WebDAV 上游异常) 只跳过该目录, 整轮不失败,
+    且不把该目录里的历史文件误标为源端消失; 根目录失败才整轮失败。"""
+    fake = FakeCd2Client()
+    fake.add_dir("/A")
+    fake.add_dir("/A/Bad")
+    fake.add_file("/A/good.mkv")
+    fake.add_file("/A/Bad/x.mkv")
+    fake.fail_dirs = {"/A/Bad"}
+    engine, store = make_engine(tmp_path, fake)
+    task_id = engine.config.tasks[0].id
+    key_x = store_mod.state_key_of(task_id, "id-/A/Bad/x.mkv", "/A/Bad/x.mkv")
+    store.upsert_done(
+        state_key=key_x, task_id=task_id, source_path="/A/Bad/x.mkv",
+        source_file_id="id-/A/Bad/x.mkv", size=100,
+        check_value="sha1:aaa", target_path="/B/Bad/x.mkv")
+    s = engine.run_once()
+    assert s.failed == 0 and fake.copy_calls == 1
+    engine.poll_copy_tasks()
+    assert store.get_state(key_x)["status"] == "done"
+    fake.fail_dirs = {"/A"}
+    s2 = engine.run_once()
+    assert s2.tasks and s2.tasks[0].get("error")
+
+def test_debug_logging_config(tmp_path):
+    cfg = SyncConfig.from_dict({"debug_logging": True})
+    assert cfg.debug_logging is True
+    assert cfg.to_dict()["debug_logging"] is True
+    assert SyncConfig.from_dict({}).debug_logging is False
+
+
+def test_poll_removes_only_own_completed_tasks(tmp_path):
+    """对账完成后用 RemoveCopyTasks 只删本插件结算的那条 CD2 任务,
+    CD2 里其它已完成任务 (如手动建的) 不受影响。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    engine.config.tasks[0].max_concurrent_sync = 1
+    engine.run_once()
+    # 一条与本插件无关的已完成任务
+    fake.copy_tasks.append(cd2_mod.Cd2CopyTask(
+        source_path="/X/other.mkv", dest_path="/Y", status=3,
+        total_files=1, uploaded_files=1, failed_files=0))
+    fake.complete_tasks()
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 1
+    assert fake.removed_keys == ["/A/movie1.mkv:/B"]
+    remaining = {(t.source_path, t.dest_path) for t in fake.copy_tasks}
+    assert ("/X/other.mkv", "/Y") in remaining
+
+
+def test_poll_failed_source_gone_marks_skipped(tmp_path):
+    """远端失败 + 实查源文件已不存在: 标记跳过 (excluded), 不重启。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
+    engine.config.tasks[0].max_concurrent_sync = 1
+    engine.run_once()
+    del fake.files["/A/movie1.mkv"]  # 源文件被删了
+    fake.fail_tasks()
+    engine.poll_copy_tasks()
+    assert fake.restarted == []
+    states = store.list_states(status="excluded")
+    assert len(states) == 1
+    assert "源文件不存在" in (states[0]["last_error"] or "")
+    # 后续扫描也不会再提交它 (源文件已不在扫描结果里, 且状态被排除)
+    assert store.count_states().get("failed") is None
+
+
+def test_poll_interval_config_roundtrip(tmp_path):
+    """新增全局配置 copy_poll_interval_seconds: 默认 10, 可保存可读回,
+    save_global 接口能改 (前端全局设置用)。"""
+    assert SyncConfig.from_dict({}).copy_poll_interval_seconds == 10
+    cfg = SyncConfig.from_dict({"copy_poll_interval_seconds": 25})
+    assert cfg.to_dict()["copy_poll_interval_seconds"] == 25
+
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_poll", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_poll"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    saved = {}
+    plugin.update_config = lambda c: saved.update(c) or True
+    plugin.init_plugin({"enabled": True, "tasks": []})
+    res = plugin.api_save_global(copy_poll_interval_seconds=30)
+    assert res["ok"] and res["config"]["copy_poll_interval_seconds"] == 30
+    import datetime as _dt
+    import types as _types
+
+    class _FakeTrigger:
+        def __init__(self, minutes=0, seconds=0, **kw):
+            self.interval = _dt.timedelta(minutes=minutes, seconds=seconds)
+
+    _trig = _types.ModuleType("apscheduler.triggers.interval")
+    _trig.IntervalTrigger = _FakeTrigger
+    sys.modules.setdefault("apscheduler", _types.ModuleType("apscheduler"))
+    sys.modules["apscheduler.triggers"] = _types.ModuleType(
+        "apscheduler.triggers")
+    sys.modules["apscheduler.triggers.interval"] = _trig
+    services = plugin.get_service()
+    poll = [x for x in services if x["id"].endswith("Poll")]
+    assert len(poll) == 1
+    assert poll[0]["trigger"].interval.total_seconds() == 30
+    plugin.stop_service()
+
+
+def test_delete_task_cancels_copying_cd2_tasks(tmp_path):
+    """删任务时先用 CancelCopyTask 取消它进行中的 CD2 复制任务。"""
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_cancel", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_cancel"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    saved = {}
+    plugin.update_config = lambda c: saved.update(c) or True
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "t1", "name": "任务一", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"}]})
+    fake = FakeCd2Client()
+    plugin._client = fake
+    plugin._engine.client = fake
+    plugin._store.upsert_copying(
+        state_key=store_mod.state_key_of("t1", "f1", "/A/a.mkv"),
+        task_id="t1", source_path="/A/a.mkv", source_file_id="f1",
+        size=1, check_value="h", target_path="/B/a.mkv")
+    res = plugin.api_delete_task(task_id="t1")
+    assert res.get("ok"), res
+    assert fake.cancelled == [("/A/a.mkv", "/B")]
+    plugin.stop_service()
