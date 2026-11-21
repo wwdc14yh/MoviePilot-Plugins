@@ -157,11 +157,11 @@ function saveConfig() {
           </v-col>
           <v-col cols="12" md="4">
             <v-text-field v-model.number="task.interval_minutes" type="number"
-              label="扫描间隔 (分钟)" hint="本任务独立调度" persistent-hint />
+              label="扫描间隔 (分钟)" />
           </v-col>
           <v-col cols="12" md="4">
             <v-text-field v-model.number="task.max_concurrent_sync" type="number"
-              min="1" label="同步线程" hint="每轮最多同时进行的文件数" persistent-hint />
+              min="1" label="同步线程" />
           </v-col>
           <v-col v-if="task.mode === 'move'" cols="12" md="4">
             <v-switch v-model="task.delete_empty_dirs" color="primary" hide-details

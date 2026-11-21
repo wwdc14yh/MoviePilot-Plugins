@@ -385,9 +385,7 @@ return (_ctx, _cache) => {
                         "onUpdate:modelValue": $event => ((task.interval_minutes) = $event),
                         modelModifiers: { number: true },
                         type: "number",
-                        label: "扫描间隔 (分钟)",
-                        hint: "本任务独立调度",
-                        "persistent-hint": ""
+                        label: "扫描间隔 (分钟)"
                       }, null, 8, ["modelValue", "onUpdate:modelValue"])
                     ]),
                     _: 2
@@ -403,9 +401,7 @@ return (_ctx, _cache) => {
                         modelModifiers: { number: true },
                         type: "number",
                         min: "1",
-                        label: "同步线程",
-                        hint: "每轮最多同时进行的文件数",
-                        "persistent-hint": ""
+                        label: "同步线程"
                       }, null, 8, ["modelValue", "onUpdate:modelValue"])
                     ]),
                     _: 2

@@ -557,7 +557,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.6.2"
+    assert plugin.plugin_version == "0.6.3"
     plugin.stop_service()
 
 

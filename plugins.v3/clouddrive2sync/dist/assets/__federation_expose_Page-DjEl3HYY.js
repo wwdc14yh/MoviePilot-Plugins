@@ -1276,9 +1276,7 @@ return (_ctx, _cache) => {
                                 "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((taskDialog.value.form.interval_minutes) = $event)),
                                 modelModifiers: { number: true },
                                 type: "number",
-                                label: "扫描间隔 (分钟)",
-                                hint: "本任务独立的定时扫描周期",
-                                "persistent-hint": ""
+                                label: "扫描间隔 (分钟)"
                               }, null, 8, ["modelValue"])
                             ]),
                             _: 1
@@ -1314,9 +1312,7 @@ return (_ctx, _cache) => {
                                 modelModifiers: { number: true },
                                 type: "number",
                                 min: "1",
-                                label: "同步线程",
-                                hint: "每轮最多同时进行的文件数",
-                                "persistent-hint": ""
+                                label: "同步线程"
                               }, null, 8, ["modelValue"])
                             ]),
                             _: 1
@@ -1341,7 +1337,8 @@ return (_ctx, _cache) => {
                             : _createCommentVNode("", true)
                         ]),
                         _: 1
-                      })
+                      }),
+                      _cache[72] || (_cache[72] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-1" }, " 扫描间隔：本任务独立的定时扫描周期；同步线程：每轮最多同时进行的文件数。 ", -1))
                     ])
                   ]),
                   _: 1
@@ -1353,7 +1350,7 @@ return (_ctx, _cache) => {
                       variant: "text",
                       onClick: _cache[30] || (_cache[30] = $event => (taskDialog.value.show = false))
                     }, {
-                      default: _withCtx(() => [...(_cache[72] || (_cache[72] = [
+                      default: _withCtx(() => [...(_cache[73] || (_cache[73] = [
                         _createTextVNode("取消", -1)
                       ]))]),
                       _: 1
@@ -1386,7 +1383,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, null, {
-              default: _withCtx(() => [...(_cache[73] || (_cache[73] = [
+              default: _withCtx(() => [...(_cache[74] || (_cache[74] = [
                 _createTextVNode("删除任务", -1)
               ]))]),
               _: 1
@@ -1404,7 +1401,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[32] || (_cache[32] = $event => (taskConfirmDelete.value.show = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[74] || (_cache[74] = [
+                  default: _withCtx(() => [...(_cache[75] || (_cache[75] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -1413,7 +1410,7 @@ return (_ctx, _cache) => {
                   color: "error",
                   onClick: deleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[75] || (_cache[75] = [
+                  default: _withCtx(() => [...(_cache[76] || (_cache[76] = [
                     _createTextVNode("删除任务", -1)
                   ]))]),
                   _: 1
@@ -1436,7 +1433,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, null, {
-              default: _withCtx(() => [...(_cache[76] || (_cache[76] = [
+              default: _withCtx(() => [...(_cache[77] || (_cache[77] = [
                 _createTextVNode("确认删除", -1)
               ]))]),
               _: 1
@@ -1444,7 +1441,7 @@ return (_ctx, _cache) => {
             _createVNode(_component_v_card_text, null, {
               default: _withCtx(() => [
                 _createElementVNode("p", null, "文件：" + _toDisplayString(confirm.value.item?.file_name), 1),
-                _cache[77] || (_cache[77] = _createElementVNode("p", { class: "mt-2" }, [
+                _cache[78] || (_cache[78] = _createElementVNode("p", { class: "mt-2" }, [
                   _createTextVNode(" 将删除"),
                   _createElementVNode("b", null, "目标端"),
                   _createTextVNode("的这份副本, 并把该文件标记为已排除, 此任务以后不再同步它。 源文件不会被删除。 ")
@@ -1462,7 +1459,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[34] || (_cache[34] = $event => (confirm.value.show = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[78] || (_cache[78] = [
+                  default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -1471,7 +1468,7 @@ return (_ctx, _cache) => {
                   color: "error",
                   onClick: doDelete
                 }, {
-                  default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
+                  default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
                     _createTextVNode("删除并排除", -1)
                   ]))]),
                   _: 1
@@ -1490,6 +1487,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-49ef0446"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6f70d276"]]);
 
 export { Page as default };

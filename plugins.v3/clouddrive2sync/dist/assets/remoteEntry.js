@@ -2,17 +2,17 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./Page":()=>{
-      dynamicLoadingCss(["__federation_expose_Page-BPJXQ6Y4.css"], false, './Page');
-      return __federation_import('./__federation_expose_Page-BpzcUs3_.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["__federation_expose_Page-D8s_ylKA.css"], false, './Page');
+      return __federation_import('./__federation_expose_Page-DjEl3HYY.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
       dynamicLoadingCss([], false, './Config');
-      return __federation_import('./__federation_expose_Config-dlTIHO_u.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Config-x4TBM3bH.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Dashboard":()=>{
       dynamicLoadingCss([], false, './Dashboard');
       return __federation_import('./__federation_expose_Dashboard-dE6jhE5f.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./AppPage":()=>{
-      dynamicLoadingCss(["__federation_expose_Page-BPJXQ6Y4.css"], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-CSaOF_ZN.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      dynamicLoadingCss(["__federation_expose_Page-D8s_ylKA.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-BzKGC0ln.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;
