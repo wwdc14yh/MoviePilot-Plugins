@@ -49,22 +49,9 @@ function newTask() {
 
 function normalize(cfg) {
   const c = JSON.parse(JSON.stringify(cfg || {}))
-  if (!Array.isArray(c.tasks) || !c.tasks.length) {
-    // 兼容旧的单任务配置
-    if (c.source_path || c.target_path) {
-      c.tasks = [{
-        id: 'default',
-        name: '默认任务',
-        enabled: true,
-        mode: 'sync',
-        source_path: c.source_path || '',
-        target_path: c.target_path || '',
-        conflict_policy: '',
-        delete_empty_dirs: false,
-      }]
-    } else {
-      c.tasks = [newTask()]
-    }
+  if (!Array.isArray(c.tasks)) {
+    // 没有任务就是空列表, 不从旧单任务字段拼凑任务 (防删光后复活)
+    c.tasks = []
   }
   c.tasks = c.tasks.map(t => ({ ...newTask(), ...t }))
   return c
@@ -171,6 +158,8 @@ function saveConfig() {
           <v-col cols="12" md="4">
             <v-text-field v-model.number="task.interval_minutes" type="number"
               label="扫描间隔 (分钟)" hint="本任务独立调度" persistent-hint />
+          </v-col>
+          <v-col cols="12" md="4">
             <v-text-field v-model.number="task.max_concurrent_sync" type="number"
               min="1" label="同步线程" hint="每轮最多同时进行的文件数" persistent-hint />
           </v-col>

@@ -657,16 +657,21 @@ onUnmounted(() => {
             <v-col cols="12" md="4">
               <v-text-field v-model.number="taskDialog.form.interval_minutes"
                 type="number" label="扫描间隔 (分钟)" hint="本任务独立的定时扫描周期" persistent-hint />
-              <v-text-field v-model.number="taskDialog.form.max_concurrent_sync"
-                type="number" min="1" label="同步线程"
-                hint="每轮最多同时进行的文件数" persistent-hint />
             </v-col>
             <v-col cols="12" md="4">
               <v-switch v-model="taskDialog.form.enabled" label="启用任务"
                 color="primary" hide-details />
-              <v-switch v-if="taskDialog.form.mode === 'move'"
-                v-model="taskDialog.form.delete_empty_dirs" color="primary"
-                hide-details label="移动后清理源端空目录" />
+            </v-col>
+          </v-row>
+          <v-row>
+            <v-col cols="12" md="4">
+              <v-text-field v-model.number="taskDialog.form.max_concurrent_sync"
+                type="number" min="1" label="同步线程"
+                hint="每轮最多同时进行的文件数" persistent-hint />
+            </v-col>
+            <v-col v-if="taskDialog.form.mode === 'move'" cols="12" md="4">
+              <v-switch v-model="taskDialog.form.delete_empty_dirs"
+                color="primary" hide-details label="移动后清理源端空目录" />
             </v-col>
           </v-row>
           </div>

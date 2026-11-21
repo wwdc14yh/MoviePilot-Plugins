@@ -1279,16 +1279,6 @@ return (_ctx, _cache) => {
                                 label: "扫描间隔 (分钟)",
                                 hint: "本任务独立的定时扫描周期",
                                 "persistent-hint": ""
-                              }, null, 8, ["modelValue"]),
-                              _createVNode(_component_v_text_field, {
-                                modelValue: taskDialog.value.form.max_concurrent_sync,
-                                "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((taskDialog.value.form.max_concurrent_sync) = $event)),
-                                modelModifiers: { number: true },
-                                type: "number",
-                                min: "1",
-                                label: "同步线程",
-                                hint: "每轮最多同时进行的文件数",
-                                "persistent-hint": ""
                               }, null, 8, ["modelValue"])
                             ]),
                             _: 1
@@ -1300,24 +1290,55 @@ return (_ctx, _cache) => {
                             default: _withCtx(() => [
                               _createVNode(_component_v_switch, {
                                 modelValue: taskDialog.value.form.enabled,
-                                "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((taskDialog.value.form.enabled) = $event)),
+                                "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((taskDialog.value.form.enabled) = $event)),
                                 label: "启用任务",
                                 color: "primary",
                                 "hide-details": ""
-                              }, null, 8, ["modelValue"]),
-                              (taskDialog.value.form.mode === 'move')
-                                ? (_openBlock(), _createBlock(_component_v_switch, {
-                                    key: 0,
+                              }, null, 8, ["modelValue"])
+                            ]),
+                            _: 1
+                          })
+                        ]),
+                        _: 1
+                      }),
+                      _createVNode(_component_v_row, null, {
+                        default: _withCtx(() => [
+                          _createVNode(_component_v_col, {
+                            cols: "12",
+                            md: "4"
+                          }, {
+                            default: _withCtx(() => [
+                              _createVNode(_component_v_text_field, {
+                                modelValue: taskDialog.value.form.max_concurrent_sync,
+                                "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((taskDialog.value.form.max_concurrent_sync) = $event)),
+                                modelModifiers: { number: true },
+                                type: "number",
+                                min: "1",
+                                label: "同步线程",
+                                hint: "每轮最多同时进行的文件数",
+                                "persistent-hint": ""
+                              }, null, 8, ["modelValue"])
+                            ]),
+                            _: 1
+                          }),
+                          (taskDialog.value.form.mode === 'move')
+                            ? (_openBlock(), _createBlock(_component_v_col, {
+                                key: 0,
+                                cols: "12",
+                                md: "4"
+                              }, {
+                                default: _withCtx(() => [
+                                  _createVNode(_component_v_switch, {
                                     modelValue: taskDialog.value.form.delete_empty_dirs,
                                     "onUpdate:modelValue": _cache[29] || (_cache[29] = $event => ((taskDialog.value.form.delete_empty_dirs) = $event)),
                                     color: "primary",
                                     "hide-details": "",
                                     label: "移动后清理源端空目录"
-                                  }, null, 8, ["modelValue"]))
-                                : _createCommentVNode("", true)
-                            ]),
-                            _: 1
-                          })
+                                  }, null, 8, ["modelValue"])
+                                ]),
+                                _: 1
+                              }))
+                            : _createCommentVNode("", true)
                         ]),
                         _: 1
                       })
@@ -1469,6 +1490,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-37e18db6"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-49ef0446"]]);
 
 export { Page as default };

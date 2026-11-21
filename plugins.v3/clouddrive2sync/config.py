@@ -7,8 +7,7 @@
          源端消失不动目标
 - move   移动: 复制并校验完成后删除源文件 (可选清理空目录)
 
-兼容: v0.2 及更早的单任务配置 (顶层 source_path/target_path) 在 from_dict
-时自动迁移成一个 sync 模式的默认任务。
+注: v0.6.2 起不再做旧单任务配置迁移, tasks 为空就是没有任务。
 """
 from __future__ import annotations
 
@@ -112,8 +111,9 @@ class SyncTask:
         return {k: getattr(self, k) for k in _TASK_FIELDS}
 
 
-def _parse_tasks(raw, legacy):
-    """解析 tasks 配置: 接受 list / JSON 字符串; 为空时用旧单任务字段迁移。"""
+def _parse_tasks(raw):
+    """解析 tasks 配置: 接受 list / JSON 字符串。没有任务就是没有,
+    不再从旧单任务字段迁移生成 (删掉最后一个任务后不能被"复活")。"""
     tasks = []
     if isinstance(raw, str) and raw.strip():
         try:
@@ -130,21 +130,6 @@ def _parse_tasks(raw, legacy):
         if task.id in seen:
             task.id = uuid.uuid4().hex[:12]
         seen.add(task.id)
-    if not tasks:
-        source = str(legacy.get("source_path") or "").strip()
-        target = str(legacy.get("target_path") or "").strip()
-        if source or target:
-            tasks.append(
-                SyncTask.from_dict(
-                    {
-                        "name": "默认任务",
-                        "mode": "sync",
-                        "source_path": source,
-                        "target_path": target,
-                        "conflict_policy": legacy.get("conflict_policy") or "",
-                    }
-                )
-            )
     return tasks
 
 
@@ -166,7 +151,7 @@ class SyncConfig:
     copy_poll_interval_seconds: int = _GLOBAL_DEFAULTS[
         "copy_poll_interval_seconds"]
     tasks: list = field(default_factory=list)
-    # 旧单任务字段, 仅迁移来源, 不再单独使用
+    # 顶层路径仅由 to_dict 按第一个任务回填展示, 不参与任务解析
     source_path: str = ""
     target_path: str = ""
     conflict_policy: str = "skip"
@@ -178,16 +163,17 @@ class SyncConfig:
         cfg.source_path = str(data.get("source_path") or "")
         cfg.target_path = str(data.get("target_path") or "")
         cfg.conflict_policy = str(data.get("conflict_policy") or "skip")
-        cfg.tasks = _parse_tasks(data.get("tasks"), data)
+        cfg.tasks = _parse_tasks(data.get("tasks"))
         return cfg
 
     def to_dict(self):
         result = {k: getattr(self, k) for k in _GLOBAL_FIELDS}
         result["tasks"] = [t.to_dict() for t in self.tasks]
-        # 顶层路径保留第一个任务的值, 兼容旧前端/外部读取
+        # 顶层路径仅作展示: 有任务时取第一个任务的, 没有任务就是空,
+        # 不能残留已删任务的路径 (会被误当成还有任务)
         first = self.tasks[0] if self.tasks else None
-        result["source_path"] = first.source_path if first else self.source_path
-        result["target_path"] = first.target_path if first else self.target_path
+        result["source_path"] = first.source_path if first else ""
+        result["target_path"] = first.target_path if first else ""
         result["conflict_policy"] = self.conflict_policy
         return result
 

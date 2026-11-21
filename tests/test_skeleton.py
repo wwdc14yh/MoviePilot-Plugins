@@ -190,9 +190,11 @@ class FakeCd2Client:
 def make_engine(tmp_path, fake, **overrides):
     cfg_data = {
         "enabled": True,
-        "source_path": "/A",
-        "target_path": "/B",
         "max_retries": 5,
+        "tasks": [
+            {"name": "默认任务", "mode": "sync",
+             "source_path": "/A", "target_path": "/B"}
+        ],
     }
     cfg_data.update(overrides)
     cfg = SyncConfig.from_dict(cfg_data)
@@ -448,11 +450,13 @@ def test_backup_mode_rename_on_change_and_no_gone(tmp_path):
     assert s.gone_marked == 0
     assert store.count_states("bk").get("done") == 3
 
-def test_config_legacy_migration_and_tasks_parse(tmp_path):
+
+def test_config_tasks_parse_no_legacy_migration(tmp_path):
+    """v0.6.2 起不再做旧单任务迁移: 只有顶层路径、没有 tasks 时
+    任务列表为空 (删掉最后一个任务后不能被复活成默认任务)。"""
     cfg = SyncConfig.from_dict({"source_path": "/A", "target_path": "/B"})
-    assert len(cfg.tasks) == 1
-    assert cfg.tasks[0].mode == "sync"
-    assert cfg.tasks[0].source_path == "/A"
+    assert cfg.tasks == []
+    assert SyncConfig.from_dict(cfg.to_dict()).tasks == []
     import json as _json
     cfg2 = SyncConfig.from_dict({
         "tasks": _json.dumps([
@@ -472,8 +476,9 @@ def test_plugin_class_loads_and_form(tmp_path):
     spec.loader.exec_module(mod)
     plugin = mod.CloudDrive2Sync()
     plugin._data_path_override = str(tmp_path)
-    plugin.init_plugin({"enabled": True, "source_path": "/A",
-                        "target_path": "/B"})
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "t1", "name": "任务一", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"}]})
     assert plugin.get_state() is True
     form, defaults = plugin.get_form()
     assert defaults["copy_poll_interval_seconds"] == 10
@@ -520,8 +525,9 @@ def test_remote_command_triggers_sync_and_ignores_others(tmp_path):
     spec.loader.exec_module(mod)
     plugin = mod.CloudDrive2Sync()
     plugin._data_path_override = str(tmp_path)
-    plugin.init_plugin({"enabled": True, "source_path": "/A",
-                        "target_path": "/B"})
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "t1", "name": "任务一", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"}]})
     assert plugin.get_state() is True
     calls = []
     plugin._run_once_async = lambda: calls.append(True)
@@ -551,7 +557,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.6.1"
+    assert plugin.plugin_version == "0.6.2"
     plugin.stop_service()
 
 
@@ -1059,4 +1065,29 @@ def test_per_task_scan_interval_services(tmp_path):
                                source_path="/A", target_path="/B",
                                interval_minutes=45)
     assert res["ok"] and res["task"]["interval_minutes"] == 45
+    plugin.stop_service()
+
+
+def test_delete_only_task_stays_deleted(tmp_path):
+    """回归: 只有一个任务时删除它, 不能被旧单任务迁移复活成默认任务。"""
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_del1", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_del1"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    saved = {}
+    plugin.update_config = lambda c: saved.update(c) or True
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "only", "name": "唯一任务", "mode": "sync",
+         "source_path": "/WebDAV/quark/整理失败",
+         "target_path": "/MoviePilot Library/Test"}]})
+    assert len(plugin._config.tasks) == 1
+    res = plugin.api_delete_task(task_id="only")
+    assert res.get("ok"), res
+    assert plugin._config.tasks == []
+    assert plugin.api_status()["tasks"] == []
+    # 持久化后的配置再读回来也不能复活
+    assert SyncConfig.from_dict(saved).tasks == []
     plugin.stop_service()
