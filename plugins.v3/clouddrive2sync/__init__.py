@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.5.1"
+    plugin_version = "0.6.1"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -213,16 +213,22 @@ class CloudDrive2Sync(_PluginBase):
             return []
         from apscheduler.triggers.interval import IntervalTrigger
 
-        return [
-            {
-                "id": "CloudDrive2Sync.Sync",
-                "name": "CloudDrive2 网盘增量同步",
-                "trigger": IntervalTrigger(
-                    minutes=max(1, int(self._config.interval_minutes))
-                ),
-                "func": self.run_sync,
-                "kwargs": {},
-            },
+        services = []
+        for task in self._config.tasks:
+            if not task.enabled:
+                continue
+            services.append(
+                {
+                    "id": "CloudDrive2Sync.Sync.%s" % task.id,
+                    "name": "CloudDrive2 网盘同步 - %s" % (task.name or task.id),
+                    "trigger": IntervalTrigger(
+                        minutes=max(1, int(task.interval_minutes or 30))
+                    ),
+                    "func": self.run_sync,
+                    "kwargs": {"task_id": task.id},
+                }
+            )
+        services.append(
             {
                 "id": "CloudDrive2Sync.Poll",
                 "name": "CloudDrive2 复制任务状态轮询对账",
@@ -234,8 +240,9 @@ class CloudDrive2Sync(_PluginBase):
                 ),
                 "func": self.run_poll,
                 "kwargs": {},
-            },
-        ]
+            }
+        )
+        return services
 
     def run_poll(self):
         """后台轮询对账入口 (宿主调度器周期调用, 间隔读全局配置)。"""
@@ -508,7 +515,8 @@ class CloudDrive2Sync(_PluginBase):
                       mode: str = "sync", source_path: str = "",
                       target_path: str = "", conflict_policy: str = "",
                       delete_empty_dirs: bool = False,
-                      max_concurrent_sync: int = 1):
+                      max_concurrent_sync: int = 1,
+                      interval_minutes: int = 30):
         """新建任务 (无 id 或 id 不存在) 或更新已有任务 (id 命中)。
 
         参数必须是显式标量: 宿主把插件 API 注册为 FastAPI 路由,
@@ -521,6 +529,7 @@ class CloudDrive2Sync(_PluginBase):
             "conflict_policy": conflict_policy,
             "delete_empty_dirs": delete_empty_dirs,
             "max_concurrent_sync": max_concurrent_sync,
+            "interval_minutes": interval_minutes,
         }
         if self._config is None:
             return {"ok": False, "error": "插件未初始化"}
@@ -580,10 +589,8 @@ class CloudDrive2Sync(_PluginBase):
         return self._persist_config()
 
     def api_save_global(self, enabled: bool = None, cd2_address: str = None,
-                        cd2_token: str = None, interval_minutes: int = None,
+                        cd2_token: str = None,
                         max_retries: int = None,
-                        verify_wait_seconds: int = None,
-                        verify_interval_seconds: int = None,
                         pending_timeout_hours: int = None,
                         copy_timeout_seconds: int = None,
                         history_retention_days: int = None,
@@ -599,10 +606,8 @@ class CloudDrive2Sync(_PluginBase):
         """
         payload = {
             "enabled": enabled, "cd2_address": cd2_address,
-            "cd2_token": cd2_token, "interval_minutes": interval_minutes,
+            "cd2_token": cd2_token,
             "max_retries": max_retries,
-            "verify_wait_seconds": verify_wait_seconds,
-            "verify_interval_seconds": verify_interval_seconds,
             "pending_timeout_hours": pending_timeout_hours,
             "copy_timeout_seconds": copy_timeout_seconds,
             "history_retention_days": history_retention_days,
@@ -731,14 +736,6 @@ class CloudDrive2Sync(_PluginBase):
                         row(
                             col(
                                 text(
-                                    "interval_minutes",
-                                    "扫描间隔 (分钟)",
-                                    hint="每隔多久扫描一次源目录并提交新的复制任务",
-                                    type_="number",
-                                )
-                            ),
-                            col(
-                                text(
                                     "copy_poll_interval_seconds",
                                     "复制任务轮询间隔 (秒)",
                                     hint="后台多久拉一次 CD2 复制任务状态与本地对账",
@@ -780,26 +777,9 @@ class CloudDrive2Sync(_PluginBase):
                         "异步校验与记录清理",
                         "网盘复制是异步的: 提交成功不等于传完, 完成状态跨轮询确认",
                         alert(
-                            "复制提交后先在本轮等待一小段时间确认, 没传完的会"
-                            "留在“同步中”, 后续每轮自动结算, 不会误判失败, "
-                            "也不会重复提交。"
-                        ),
-                        row(
-                            col(
-                                text(
-                                    "verify_wait_seconds",
-                                    "提交后本轮等待 (秒)",
-                                    hint="0 表示提交后不等待, 全部留到下一轮结算",
-                                    type_="number",
-                                )
-                            ),
-                            col(
-                                text(
-                                    "verify_interval_seconds",
-                                    "等待时轮询间隔 (秒)",
-                                    type_="number",
-                                )
-                            ),
+                            "复制提交后由后台轮询对账确认完成 (间隔见“复制"
+                            "任务轮询间隔”), 没传完的留在“同步中”, 不会误判"
+                            "失败, 也不会重复提交。"
                         ),
                         row(
                             col(

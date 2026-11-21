@@ -43,6 +43,7 @@ function newTask() {
     conflict_policy: '',
     delete_empty_dirs: false,
     max_concurrent_sync: 1,
+    interval_minutes: 30,
   }
 }
 
@@ -108,10 +109,6 @@ function saveConfig() {
             <v-switch v-model="config.debug_logging" label="详细日志" color="primary" hide-details />
           </v-col>
           <v-col cols="12" md="3">
-            <v-text-field v-model.number="config.interval_minutes" type="number"
-              label="扫描间隔 (分钟)" hint="所有任务共用这个周期" persistent-hint />
-          </v-col>
-          <v-col cols="12" md="3">
             <v-text-field v-model.number="config.copy_poll_interval_seconds" type="number"
               label="复制任务轮询间隔 (秒)" hint="后台拉取 CD2 任务状态对账的间隔" persistent-hint />
           </v-col>
@@ -172,6 +169,8 @@ function saveConfig() {
               label="目标同名文件冲突策略" />
           </v-col>
           <v-col cols="12" md="4">
+            <v-text-field v-model.number="task.interval_minutes" type="number"
+              label="扫描间隔 (分钟)" hint="本任务独立调度" persistent-hint />
             <v-text-field v-model.number="task.max_concurrent_sync" type="number"
               min="1" label="同步线程" hint="每轮最多同时进行的文件数" persistent-hint />
           </v-col>
@@ -187,14 +186,6 @@ function saveConfig() {
       <v-card-title>异步校验与记录清理（全局）</v-card-title>
       <v-card-text>
         <v-row>
-          <v-col cols="12" md="4">
-            <v-text-field v-model.number="config.verify_wait_seconds" type="number"
-              label="提交后本轮等待 (秒)" hint="0 = 全部留到下一轮结算" persistent-hint />
-          </v-col>
-          <v-col cols="12" md="4">
-            <v-text-field v-model.number="config.verify_interval_seconds" type="number"
-              label="等待时轮询间隔 (秒)" />
-          </v-col>
           <v-col cols="12" md="4">
             <v-text-field v-model.number="config.pending_timeout_hours" type="number"
               label="同步中超时判失败 (小时)" />

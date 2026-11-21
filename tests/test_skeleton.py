@@ -476,9 +476,10 @@ def test_plugin_class_loads_and_form(tmp_path):
                         "target_path": "/B"})
     assert plugin.get_state() is True
     form, defaults = plugin.get_form()
-    assert defaults["interval_minutes"] == 30
+    assert defaults["copy_poll_interval_seconds"] == 10
     assert defaults["state_tombstone_days"] == 30
-    assert defaults["verify_wait_seconds"] == 30
+    assert "verify_wait_seconds" not in defaults
+    assert "verify_interval_seconds" not in defaults
     assert defaults["conflict_policy"] == "skip"
     paths = [a["path"] for a in plugin.get_api()]
     assert "/save_task" in paths and "/delete_task" in paths and "/files" in paths
@@ -550,7 +551,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.5.1"
+    assert plugin.plugin_version == "0.6.1"
     plugin.stop_service()
 
 
@@ -656,15 +657,16 @@ def test_files_pagination_and_save_global(tmp_path):
     # 状态过滤分页
     pf = plugin.api_files(task_id="t1", status="failed", limit=10, offset=0)
     assert pf["total"] == 0 and pf["files"] == []
-    # 全局设置: 改间隔/超时, 任务列表不受影响
-    res = plugin.api_save_global(interval_minutes=45, copy_timeout_seconds=300)
+    # 全局设置: 改轮询间隔/超时, 任务列表不受影响
+    res = plugin.api_save_global(copy_poll_interval_seconds=45,
+                                 copy_timeout_seconds=300)
     assert res["ok"]
-    assert plugin._config.interval_minutes == 45
+    assert plugin._config.copy_poll_interval_seconds == 45
     assert plugin._config.copy_timeout_seconds == 300
     assert len(plugin._config.tasks) == 1
     # /status 带全局配置
     st = plugin.api_status()
-    assert st["config"]["interval_minutes"] == 45
+    assert st["config"]["copy_poll_interval_seconds"] == 45
     plugin.stop_service()
 
 
@@ -1001,4 +1003,60 @@ def test_delete_task_cancels_copying_cd2_tasks(tmp_path):
     res = plugin.api_delete_task(task_id="t1")
     assert res.get("ok"), res
     assert fake.cancelled == [("/A/a.mkv", "/B")]
+    plugin.stop_service()
+
+
+def test_per_task_scan_interval_services(tmp_path):
+    """扫描间隔是任务配置项: 每个启用的任务注册独立的调度服务,
+    间隔各读各的; 全局配置里不再有这个字段。"""
+    assert "interval_minutes" not in SyncConfig.from_dict({}).to_dict()
+    task = config_mod.SyncTask.from_dict(
+        {"source_path": "/A", "target_path": "/B"})
+    assert task.interval_minutes == 30
+    task2 = config_mod.SyncTask.from_dict(
+        {"source_path": "/A", "target_path": "/B", "interval_minutes": 5})
+    assert task2.interval_minutes == 5
+    assert task2.to_dict()["interval_minutes"] == 5
+
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_svc", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_svc"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    plugin.update_config = lambda c: True
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "ta", "name": "甲", "mode": "sync", "source_path": "/A",
+         "target_path": "/B", "interval_minutes": 15},
+        {"id": "tb", "name": "乙", "mode": "sync", "source_path": "/A",
+         "target_path": "/C", "interval_minutes": 60},
+        {"id": "tc", "name": "丙", "mode": "sync", "source_path": "/A",
+         "target_path": "/D", "enabled": False},
+    ]})
+    import datetime as _dt
+    import types as _types
+
+    class _FakeTrigger:
+        def __init__(self, minutes=0, seconds=0, **kw):
+            self.interval = _dt.timedelta(minutes=minutes, seconds=seconds)
+
+    _trig = _types.ModuleType("apscheduler.triggers.interval")
+    _trig.IntervalTrigger = _FakeTrigger
+    sys.modules.setdefault("apscheduler", _types.ModuleType("apscheduler"))
+    sys.modules["apscheduler.triggers"] = _types.ModuleType(
+        "apscheduler.triggers")
+    sys.modules["apscheduler.triggers.interval"] = _trig
+    services = plugin.get_service()
+    scans = {x["id"]: x for x in services if ".Sync." in x["id"]}
+    assert set(scans) == {"CloudDrive2Sync.Sync.ta",
+                          "CloudDrive2Sync.Sync.tb"}  # 禁用的丙没有服务
+    assert scans["CloudDrive2Sync.Sync.ta"]["trigger"].interval \
+        == _dt.timedelta(minutes=15)
+    assert scans["CloudDrive2Sync.Sync.tb"]["kwargs"] == {"task_id": "tb"}
+    # 保存任务接口能改间隔
+    res = plugin.api_save_task(id="ta", name="甲", mode="sync",
+                               source_path="/A", target_path="/B",
+                               interval_minutes=45)
+    assert res["ok"] and res["task"]["interval_minutes"] == 45
     plugin.stop_service()

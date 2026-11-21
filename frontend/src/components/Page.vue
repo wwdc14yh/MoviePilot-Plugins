@@ -53,7 +53,7 @@ function blankTask() {
   return {
     id: '', name: '', enabled: true, mode: 'sync',
     source_path: '', target_path: '', conflict_policy: '',
-    delete_empty_dirs: false, max_concurrent_sync: 1,
+    delete_empty_dirs: false, max_concurrent_sync: 1, interval_minutes: 30,
   }
 }
 function openNewTask() {
@@ -122,11 +122,8 @@ function openGlobal() {
       enabled: !!cfg.enabled,
       cd2_address: cfg.cd2_address || '127.0.0.1:19798',
       cd2_token: cfg.cd2_token || '',
-      interval_minutes: cfg.interval_minutes ?? 30,
       copy_poll_interval_seconds: cfg.copy_poll_interval_seconds ?? 10,
       max_retries: cfg.max_retries ?? 5,
-      verify_wait_seconds: cfg.verify_wait_seconds ?? 30,
-      verify_interval_seconds: cfg.verify_interval_seconds ?? 5,
       pending_timeout_hours: cfg.pending_timeout_hours ?? 24,
       copy_timeout_seconds: cfg.copy_timeout_seconds ?? 180,
       history_retention_days: cfg.history_retention_days ?? 30,
@@ -464,6 +461,7 @@ onUnmounted(() => {
                     <span>模式</span><b>{{ modeMeta[selected.mode]?.title }}</b>
                     <span>冲突策略</span><b>{{ conflictTitles[selected.conflict_policy || ''] }}</b>
                     <span>同步线程</span><b>每轮最多同时 {{ selected.max_concurrent_sync || 1 }} 个文件</b>
+                    <span>扫描间隔</span><b>每 {{ selected.interval_minutes || 30 }} 分钟</b>
                     <span>源目录</span><b class="cd2-path">{{ selected.source_path }}</b>
                     <span>目标目录</span><b class="cd2-path">{{ selected.target_path }}</b>
                     <span v-if="selected.mode === 'move'">删源后清理空目录</span>
@@ -589,10 +587,6 @@ onUnmounted(() => {
                 label="CD2 API Token" hint="移动模式需要带删除权限的 Token" persistent-hint />
             </v-col>
             <v-col cols="6" md="4">
-              <v-text-field v-model.number="globalDialog.form.interval_minutes"
-                type="number" label="扫描间隔 (分钟)" />
-            </v-col>
-            <v-col cols="6" md="4">
               <v-text-field v-model.number="globalDialog.form.copy_poll_interval_seconds"
                 type="number" label="复制任务轮询间隔 (秒)" />
             </v-col>
@@ -603,14 +597,6 @@ onUnmounted(() => {
             <v-col cols="6" md="4">
               <v-text-field v-model.number="globalDialog.form.copy_timeout_seconds"
                 type="number" label="提交复制超时 (秒)" />
-            </v-col>
-            <v-col cols="6" md="4">
-              <v-text-field v-model.number="globalDialog.form.verify_wait_seconds"
-                type="number" label="提交后等待校验 (秒)" />
-            </v-col>
-            <v-col cols="6" md="4">
-              <v-text-field v-model.number="globalDialog.form.verify_interval_seconds"
-                type="number" label="校验轮询间隔 (秒)" />
             </v-col>
             <v-col cols="6" md="4">
               <v-text-field v-model.number="globalDialog.form.pending_timeout_hours"
@@ -669,6 +655,8 @@ onUnmounted(() => {
                 :items="conflictItems" label="目标同名文件冲突策略" />
             </v-col>
             <v-col cols="12" md="4">
+              <v-text-field v-model.number="taskDialog.form.interval_minutes"
+                type="number" label="扫描间隔 (分钟)" hint="本任务独立的定时扫描周期" persistent-hint />
               <v-text-field v-model.number="taskDialog.form.max_concurrent_sync"
                 type="number" min="1" label="同步线程"
                 hint="每轮最多同时进行的文件数" persistent-hint />

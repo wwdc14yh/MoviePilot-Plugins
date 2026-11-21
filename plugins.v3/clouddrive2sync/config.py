@@ -23,10 +23,7 @@ _GLOBAL_FIELDS = (
     "enabled",
     "cd2_address",
     "cd2_token",
-    "interval_minutes",
     "max_retries",
-    "verify_wait_seconds",
-    "verify_interval_seconds",
     "pending_timeout_hours",
     "copy_timeout_seconds",
     "history_retention_days",
@@ -41,10 +38,7 @@ _GLOBAL_DEFAULTS = {
     "enabled": False,
     "cd2_address": "127.0.0.1:19798",
     "cd2_token": "",
-    "interval_minutes": 30,
     "max_retries": 5,
-    "verify_wait_seconds": 30,
-    "verify_interval_seconds": 5,
     "pending_timeout_hours": 24,
     "copy_timeout_seconds": 180,
     "history_retention_days": 30,
@@ -65,6 +59,7 @@ _TASK_FIELDS = (
     "conflict_policy",
     "delete_empty_dirs",
     "max_concurrent_sync",
+    "interval_minutes",
 )
 
 
@@ -81,6 +76,7 @@ class SyncTask:
     conflict_policy: str = ""  # 空 = 用全局; sync/backup/move 各有默认处理
     delete_empty_dirs: bool = False  # 仅 move 模式: 删源文件后清理空目录
     max_concurrent_sync: int = 1  # 每轮最多同时进行的文件同步数 (本任务独立)
+    interval_minutes: int = 30  # 本任务的扫描间隔 (分钟, 独立调度)
 
     @classmethod
     def from_dict(cls, data):
@@ -96,6 +92,12 @@ class SyncTask:
             task.max_concurrent_sync = 1
         if task.max_concurrent_sync < 1:
             task.max_concurrent_sync = 1
+        try:
+            task.interval_minutes = int(task.interval_minutes or 30)
+        except (TypeError, ValueError):
+            task.interval_minutes = 30
+        if task.interval_minutes < 1:
+            task.interval_minutes = 1
         if not task.id:
             task.id = uuid.uuid4().hex[:12]
         if task.mode not in TASK_MODES:
@@ -153,10 +155,7 @@ class SyncConfig:
     enabled: bool = _GLOBAL_DEFAULTS["enabled"]
     cd2_address: str = _GLOBAL_DEFAULTS["cd2_address"]
     cd2_token: str = _GLOBAL_DEFAULTS["cd2_token"]
-    interval_minutes: int = _GLOBAL_DEFAULTS["interval_minutes"]
     max_retries: int = _GLOBAL_DEFAULTS["max_retries"]
-    verify_wait_seconds: int = _GLOBAL_DEFAULTS["verify_wait_seconds"]
-    verify_interval_seconds: int = _GLOBAL_DEFAULTS["verify_interval_seconds"]
     pending_timeout_hours: int = _GLOBAL_DEFAULTS["pending_timeout_hours"]
     copy_timeout_seconds: int = _GLOBAL_DEFAULTS["copy_timeout_seconds"]
     history_retention_days: int = _GLOBAL_DEFAULTS["history_retention_days"]
