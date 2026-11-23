@@ -13,6 +13,10 @@ v0.7.0 起数据库带 schema 版本 (meta 表 schema_version=2):
   sync_task 行 (同步中/失败等行不迁, 源文件还在下次扫描会重新提交),
   旧表重命名为 *_v1 保留。迁移失败抛错, 不写新版本号,
   不静默跑在半迁移的库上。
+
+v0.7.1 起: 「源/目标不存在」类失败改判为删除复制任务与同步记录
+(不再落 excluded, 防 CD2 误报 not found 误杀); 打开数据库时用
+meta 标记一次性清理旧版按该判定落成 excluded 的存量行。
 """
 from __future__ import annotations
 
@@ -23,6 +27,14 @@ import time
 from pathlib import Path
 
 SCHEMA_VERSION = 2
+
+# v0.7.1 一次性清理的 meta 标记 key: 存量误杀清理只执行一次
+_CLEANUP_NOTEXIST_KEY = "cleanup_notexist_excluded_v071"
+# 旧版「不存在 -> 跳过」写入 last_error 的固定前缀, 是一次性清理的
+# 识别标记: 旧 _apply_failed 拼的说明为 "已跳过 (<原因>): <详情>",
+# 全代码只有那一处写过这个前缀; 页面手动排除 (set_excluded) 从不
+# 写 last_error, 不会命中, 可靠区分两类 excluded。
+_NOTEXIST_SKIP_PREFIX = "已跳过 ("
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -100,6 +112,9 @@ class SyncStore:
         # 本次打开若执行了老库迁移, 这里记录明细 (备份路径/迁移与
         # 丢弃行数), 供插件层打日志; 没有迁移时为 None
         self.migration_info = None
+        # 本次打开若执行了 v0.7.1 一次性存量清理, 这里记录删除行数,
+        # 供插件层打日志; 没删到行时为 0
+        self.notexist_cleanup_count = 0
         with self._lock:
             _ = self._conn  # 触发首次打开
 
@@ -123,6 +138,7 @@ class SyncStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         self._ensure_schema_locked(conn)
+        self._cleanup_notexist_excluded_locked(conn)
         conn.commit()
 
     # ---------- schema 版本与老库迁移 ----------
@@ -227,6 +243,36 @@ class SyncStore:
         )
         conn.commit()
         self.migration_info = info
+
+    def _cleanup_notexist_excluded_locked(self, conn):
+        """v0.7.1 一次性存量清理: 删掉旧版因「源/目标不存在」判定
+        被落成 excluded 的同步记录 (可能误杀, 如源文件实际存在而
+        CD2 报了 not found)。删行后下次扫描会重新评估这些文件,
+        不用人工处理。只删这一类: status='excluded' 且 last_error
+        带 _NOTEXIST_SKIP_PREFIX 前缀的行; 页面手动排除的行
+        (set_excluded 从不写 last_error) 一律保留。
+        用 meta 标记保证只执行一次, 删除行数记到
+        self.notexist_cleanup_count 供插件层打日志。"""
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (_CLEANUP_NOTEXIST_KEY,),
+        ).fetchone()
+        if row:
+            return
+        rows = conn.execute(
+            "SELECT state_key, last_error FROM sync_state "
+            "WHERE status = 'excluded'"
+        ).fetchall()
+        keys = [r[0] for r in rows
+                if (r[1] or "").startswith(_NOTEXIST_SKIP_PREFIX)]
+        for key in keys:
+            conn.execute(
+                "DELETE FROM sync_state WHERE state_key = ?", (key,))
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)",
+            (_CLEANUP_NOTEXIST_KEY, str(len(keys))),
+        )
+        self.notexist_cleanup_count = len(keys)
 
     def close(self):
         with self._lock:
@@ -348,18 +394,6 @@ class SyncStore:
         with self._lock:
             self._conn.execute(
                 "DELETE FROM sync_state WHERE state_key = ?", (state_key,)
-            )
-            self._conn.commit()
-
-    def mark_skipped(self, state_key, error, now=None):
-        """把状态标记为跳过 (落库为 excluded): 引擎永不自动重交,
-        原因写进 last_error 备查。用于远端失败且源/目标不存在时。"""
-        now = now if now is not None else time.time()
-        with self._lock:
-            self._conn.execute(
-                "UPDATE sync_state SET status = 'excluded', "
-                "last_error = ?, last_seen_at = ? WHERE state_key = ?",
-                (error, now, state_key),
             )
             self._conn.commit()
 

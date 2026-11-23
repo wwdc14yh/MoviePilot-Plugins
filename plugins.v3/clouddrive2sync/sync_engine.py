@@ -440,21 +440,31 @@ class SyncEngine:
     def _apply_failed(self, task, state, tsum, detail, matched):
         """远端失败的落地处理。
 
-        源/目标不存在 -> 标记跳过 (excluded), 不再重试; 其它失败 ->
-        记失败, 在"失败最大重试次数"内调 RestartCopyTask 自动重启;
-        超过上限 -> 删除 CD2 侧复制任务与本地 sync_state 行 (需求 4),
-        面板历史行已在上面结为失败保留 (原因与重试次数可查),
-        源文件还在时下次扫描会重新发现并提交。
+        源/目标不存在 -> 删除 CD2 侧复制任务与本地 sync_state 行
+        (v0.7.1 改判, 不再落 excluded 跳过: CD2 的 not found 可能是
+        误报, excluded 永不重提等于误杀; 删行后源文件还在时下次
+        扫描会重新发现并提交, 届时复核是真缺失还是误报; 源真没了
+        则扫描本来也不会再发现它); 其它失败 -> 记失败, 在"失败
+        最大重试次数"内调 RestartCopyTask 自动重启; 超过上限 ->
+        删除 CD2 侧复制任务与本地 sync_state 行 (需求 4), 面板
+        历史行结为失败保留 (原因与重试次数可查), 源文件还在时
+        下次扫描会重新发现并提交。
         """
         reason = self._failure_not_exist_reason(state, detail)
         if reason:
-            note = "已跳过 (%s): %s" % (reason, detail)
-            self.store.mark_skipped(state["state_key"], note)
+            note = ("源或目标不存在 (可能为误报), 已删除复制任务与"
+                    "同步记录, 等待下次扫描复核 (%s): %s"
+                    % (reason, detail))
+            if matched is not None:
+                self._delete_cd2_task(matched.source_path,
+                                      matched.dest_path)
+            self.store.delete_state(state["state_key"])
             self.store.finish_open_task(state["source_path"], "failed",
                                         error=note, task_id=task.id)
+            self._stalled.pop(state["state_key"], None)
             tsum.failed += 1
-            self._log("复制失败且不再重试 " + state["source_path"]
-                      + ": " + note)
+            self._log("复制失败 (源或目标不存在), 已删除复制任务与"
+                      "同步记录 " + state["source_path"] + ": " + note)
             return
         retries = self.store.record_failure(
             state_key=state["state_key"],
@@ -620,8 +630,9 @@ class SyncEngine:
 
         - 远端 Completed: 记成功 (移动模式删源), 并用 RemoveCopyTasks
           按 key 删掉这条 CD2 已完成任务
-        - 远端 Failed: 源/目标不存在 -> 标记跳过; 其它 -> 记失败并
-          在重试上限内 RestartCopyTask 自动重启; 超限删双侧记录
+        - 远端 Failed: 源/目标不存在 -> 删 CD2 任务与本地记录
+          (等下次扫描复核, 不再排除); 其它 -> 记失败并在重试上限内
+          RestartCopyTask 自动重启; 超限删双侧记录
         - 远端未结束但已有文件失败且连续 2 个轮询无进展: 按失败处理
         - 远端查不到该任务且已过 10 分钟宽限: 删同步项, 等下次扫描
         - 进行中: 不处理, 等下一轮轮询

@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.7.0"
+    plugin_version = "0.7.1"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -118,6 +118,15 @@ class CloudDrive2Sync(_PluginBase):
                 migration.get("task_migrated", 0),
                 migration.get("task_dropped", 0),
                 migration.get("backup_path", ""),
+            )
+        cleanup_count = getattr(
+            self._store, "notexist_cleanup_count", 0)
+        if cleanup_count:
+            logger.info(
+                "[CloudDrive2Sync] v0.7.1 一次性清理: 已删除 %d 条被"
+                "旧版按「源或目标不存在」跳过 (excluded) 的同步记录"
+                "(可能含 CD2 误报误杀), 下次扫描会重新评估这些文件",
+                cleanup_count,
             )
         self._client = Cd2GrpcClient(
             self._config.cd2_address,

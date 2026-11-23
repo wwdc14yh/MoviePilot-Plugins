@@ -569,7 +569,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.7.0"
+    assert plugin.plugin_version == "0.7.1"
     plugin.stop_service()
 
 
@@ -939,23 +939,39 @@ def test_poll_removes_only_own_completed_tasks(tmp_path):
     assert ("/X/other.mkv", "/Y") in remaining
 
 
-def test_poll_failed_source_gone_marks_skipped(tmp_path):
-    """远端失败 + 实查源文件已不存在: 标记跳过 (excluded), 不重启。"""
+def test_poll_failed_source_gone_deletes_record(tmp_path):
+    """v0.7.1 改判: 远端失败 + 实查源文件已不存在 -> 删 CD2 任务
+    与同步记录 (不再落 excluded), 面板行结为失败留原因, 不重启。
+    源真没了, 后续扫描也不会再发现它。"""
     fake = FakeCd2Client()
     fake.async_mode = True
     seed(fake)
     engine, store = make_engine(tmp_path, fake, verify_wait_seconds=0)
     engine.config.tasks[0].max_concurrent_sync = 1
     engine.run_once()
+    task_id = engine.config.tasks[0].id
+    key = store_mod.state_key_of(task_id, "f1", "/A/movie1.mkv")
+    assert store.get_state(key)["status"] == "copying"
     del fake.files["/A/movie1.mkv"]  # 源文件被删了
     fake.fail_tasks()
     engine.poll_copy_tasks()
     assert fake.restarted == []
-    states = store.list_states(status="excluded")
-    assert len(states) == 1
-    assert "源文件不存在" in (states[0]["last_error"] or "")
-    # 后续扫描也不会再提交它 (源文件已不在扫描结果里, 且状态被排除)
-    assert store.count_states().get("failed") is None
+    # 双侧删除: 本地记录消失, CD2 任务被取消+移除, 不留 excluded
+    # (轮询末尾的并发补齐会把队列里的下一个文件提交进来,
+    # 所以只断言 movie1 自己的 CD2 任务已不在)
+    assert store.get_state(key) is None
+    assert store.list_states(status="excluded") == []
+    assert all(t.source_path != "/A/movie1.mkv"
+               for t in fake.copy_tasks)
+    assert ("/A/movie1.mkv", "/B") in fake.cancelled
+    assert "/A/movie1.mkv:/B" in fake.removed_keys
+    # 面板行结为失败, 原因写明不存在 (可能为误报) + 已删除等复核
+    failed_rows = [t for t in store.list_tasks()
+                   if t["status"] == "failed"]
+    assert len(failed_rows) == 1
+    assert "源或目标不存在" in (failed_rows[0]["error"] or "")
+    assert "已删除复制任务与同步记录" in (failed_rows[0]["error"] or "")
+    assert "源文件不存在" in (failed_rows[0]["error"] or "")
 
 
 def test_poll_interval_config_roundtrip(tmp_path):
@@ -1469,3 +1485,95 @@ def test_store_migration_only_done_rows(tmp_path):
         ).fetchone()[0]
     assert version == "2"
     fresh.close()
+
+
+# ---------- v0.7.1 不存在类失败改判删除 + 存量清理 ----------
+
+
+def test_poll_failed_notfound_misreport_deletes_and_rescans(tmp_path):
+    """v0.7.1: 源文件实际存在且大小一致, CD2 却报 source file
+    not found (误报) -> 按错误信息判为不存在类失败: 删 CD2 任务
+    与同步记录 (不落 excluded), 面板结为失败; 源还在, 下一轮
+    扫描重新发现并提交复核。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    fake.add_dir("/A")
+    fake.add_dir("/B")
+    fake.add_file("A/keep.mkv", size=100, check="sha1:k", fid="fk")
+    engine, store = make_engine(tmp_path, fake)
+    task_id = engine.config.tasks[0].id
+    key = store_mod.state_key_of(task_id, "fk", "/A/keep.mkv")
+    engine.run_once()
+    assert store.get_state(key)["status"] == "copying"
+    # CD2 任务失败, 错误是 not found, 但源文件其实还在 (误报)
+    task = fake.copy_tasks[0]
+    task.status = 4
+    task.errors = ["source file not found: /A/keep.mkv"]
+    engine.poll_copy_tasks()
+    assert fake.restarted == []
+    assert store.get_state(key) is None
+    assert store.list_states(status="excluded") == []
+    assert fake.copy_tasks == []
+    assert ("/A/keep.mkv", "/B") in fake.cancelled
+    assert "/A/keep.mkv:/B" in fake.removed_keys
+    failed_rows = [t for t in store.list_tasks()
+                   if t["status"] == "failed"]
+    assert len(failed_rows) == 1
+    assert "按错误信息判断" in (failed_rows[0]["error"] or "")
+    # 源文件还在: 下一轮扫描重新提交
+    calls = fake.copy_calls
+    engine.run_once()
+    assert fake.copy_calls == calls + 1
+    assert store.get_state(key)["status"] == "copying"
+
+
+def test_store_cleanup_notexist_excluded_once(tmp_path):
+    """v0.7.1 一次性存量清理: 打开 v2 库时删掉旧版按「不存在」
+    判定落成 excluded 的行 (last_error 带 "已跳过 (" 前缀这一
+    固定标记); 页面手动排除的行 (set_excluded 从不写 last_error:
+    为空, 或是原始失败详情) 一律保留, 哪怕详情含 not found
+    字样; meta 标记保证重复打开不重复执行。"""
+    import sqlite3
+
+    db_path = Path(tmp_path) / "v2.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(store_mod._SCHEMA)
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', '2')")
+    now = time.time()
+    rows = [
+        # 旧版不存在类跳过 (清理目标, 即 S04E12 那类误杀记录)
+        ("k-notexist", "/A/gone.mkv", "excluded",
+         "已跳过 (源或目标不存在 (按错误信息判断)): /B/gone.mkv: "
+         "source file not found: /A/gone.mkv"),
+        # 手动排除的已同步文件: last_error 为空 -> 保留
+        ("k-manual-done", "/A/keep1.mkv", "excluded", None),
+        # 手动排除的失败文件: last_error 是原始失败详情 (无前缀),
+        # 含 not found 字样也保留
+        ("k-manual-failed", "/A/keep2.mkv", "excluded",
+         "复制失败: source file not found"),
+    ]
+    for key, src, status, err in rows:
+        conn.execute(
+            "INSERT INTO sync_state (state_key, task_id, source_path,"
+            " target_path, status, first_seen_at, last_seen_at,"
+            " last_error) VALUES (?,?,?,?,?,?,?,?)",
+            (key, "t1", src, "/B" + src[2:], status, now, now, err))
+    conn.commit()
+    conn.close()
+
+    store = SyncStore(db_path)
+    assert store.notexist_cleanup_count == 1
+    keys = {s["state_key"] for s in store.list_states()}
+    assert keys == {"k-manual-done", "k-manual-failed"}
+    with store._lock:
+        marker = store._conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            ("cleanup_notexist_excluded_v071",)).fetchone()
+    assert marker is not None and marker[0] == "1"
+    store.close()
+    # 重复打开: 标记已在, 不再执行, 保留行不动, 计数为 0
+    store2 = SyncStore(db_path)
+    assert store2.notexist_cleanup_count == 0
+    assert {s["state_key"] for s in store2.list_states()} == keys
+    store2.close()
