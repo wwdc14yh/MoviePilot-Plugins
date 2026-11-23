@@ -613,9 +613,22 @@ return (_ctx, _cache) => {
                 })
               ]),
               _createElementVNode("div", _hoisted_18, _toDisplayString(selected.value.source_path) + " → " + _toDisplayString(selected.value.target_path), 1),
-              (message.value)
+              (status.value.poll_error)
                 ? (_openBlock(), _createBlock(_component_v_alert, {
                     key: 0,
+                    type: "error",
+                    variant: "tonal",
+                    class: "mb-3"
+                  }, {
+                    default: _withCtx(() => [
+                      _createTextVNode(" CD2 复制任务列表读取失败（已连续失败 " + _toDisplayString(status.value.poll_error.count) + " 个轮询周期）：" + _toDisplayString(status.value.poll_error.error), 1)
+                    ]),
+                    _: 1
+                  }))
+                : _createCommentVNode("", true),
+              (message.value)
+                ? (_openBlock(), _createBlock(_component_v_alert, {
+                    key: 1,
                     type: "info",
                     variant: "tonal",
                     class: "mb-3"
@@ -1487,6 +1500,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6f70d276"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-12587d36"]]);
 
 export { Page as default };

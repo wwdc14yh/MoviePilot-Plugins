@@ -50,6 +50,9 @@ class FakeCd2Client:
         self.restarted = []
         self.cancelled = []
         self.removed_keys = []
+        # GetCopyTasks 报错模拟 (v0.7.0 需求 2): 非空时每次调用都抛错
+        self.list_error = None
+        self.list_calls = 0
 
     def delete_file(self, path):
         self.deleted.append(path)
@@ -62,6 +65,9 @@ class FakeCd2Client:
         raise Cd2Error("删除失败, 路径不存在: " + path)
 
     def get_copy_tasks(self):
+        self.list_calls += 1
+        if self.list_error:
+            raise Cd2Error(self.list_error)
         return list(self.copy_tasks)
 
     def restart_copy_task(self, source_path, dest_path):
@@ -326,7 +332,8 @@ def test_async_copy_pending_then_verified_next_run(tmp_path):
 
 
 def test_async_task_failed_records_failure(tmp_path):
-    """远端任务失败: 对账记失败并自动重启; 重试耗尽后停在失败。"""
+    """远端任务失败: 对账记失败并自动重启; 重试耗尽后 (v0.7.0 需求 4)
+    删除 CD2 任务与同步记录, 面板历史结为失败保留。"""
     fake = FakeCd2Client()
     seed(fake)
     fake.async_mode = True
@@ -341,9 +348,14 @@ def test_async_task_failed_records_failure(tmp_path):
     assert any(t["status"] == "failed" for t in store.list_tasks())
     fake.fail_tasks()
     engine.poll_copy_tasks()
-    # 第 2 次失败超过 max_retries=1: 不再重启, 停在失败
+    # 第 2 次失败超过 max_retries=1: 不再重启; CD2 任务被删,
+    # sync_state 行被删, 面板历史仍留失败行可查
     assert len(fake.restarted) == 3
-    assert store.count_states().get("failed") == 3
+    assert store.count_states().get("failed") is None
+    assert store.count_states().get("copying") is None
+    assert fake.copy_tasks == []
+    assert len(fake.removed_keys) == 3
+    assert any(t["status"] == "failed" for t in store.list_tasks())
 
 
 def test_multi_task_isolation(tmp_path):
@@ -557,7 +569,7 @@ def test_plugin_vue_render_mode_and_status(tmp_path):
     status = plugin.api_status()
     assert status["enabled"] is True
     assert status["tasks"][0]["mode"] == "move"
-    assert plugin.plugin_version == "0.6.4"
+    assert plugin.plugin_version == "0.7.0"
     plugin.stop_service()
 
 
@@ -1097,3 +1109,363 @@ def test_delete_only_task_stays_deleted(tmp_path):
     # 持久化后的配置再读回来也不能复活
     assert SyncConfig.from_dict(saved).tasks == []
     plugin.stop_service()
+
+
+# ---------- v0.7.0 新需求 ----------
+
+
+def _backdate_submitted(store, seconds):
+    """把所有 copying 记录的提交时间往前拨 (模拟宽限期已过)。"""
+    with store._lock:
+        store._conn.execute(
+            "UPDATE sync_state SET submitted_at = submitted_at - ? "
+            "WHERE status = 'copying'", (seconds,))
+        store._conn.commit()
+
+
+def test_poll_missing_task_deleted_after_grace(tmp_path):
+    """需求 1: copying 项在 CD2 列表里查不到, 宽限内保留,
+    超过 10 分钟宽限删除同步项并把面板行结为失败; done 项不动。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake)
+    task_id = engine.config.tasks[0].id
+    engine.run_once()
+    assert store.count_states().get("copying") == 3
+    # 一条已同步记录: 对账删除绝不能碰 done
+    done_key = store_mod.state_key_of(task_id, "fx", "/A/old.mkv")
+    store.upsert_done(
+        state_key=done_key, task_id=task_id, source_path="/A/old.mkv",
+        source_file_id="fx", size=1, check_value="h",
+        target_path="/B/old.mkv")
+    fake.copy_tasks = []  # CD2 侧任务全部不在列表里了
+    engine.poll_copy_tasks()
+    # 宽限期内: 还在等, 不删
+    assert store.count_states().get("copying") == 3
+    _backdate_submitted(store, 601)
+    engine.poll_copy_tasks()
+    assert store.count_states().get("copying") is None
+    assert store.get_state(done_key)["status"] == "done"
+    rows = [t for t in store.list_tasks() if t["status"] == "failed"]
+    assert len(rows) == 3
+    assert all("CD2 任务不存在" in (t["error"] or "") for t in rows)
+    # 源文件还在: 下次扫描会重新提交
+    engine.run_once()
+    assert store.count_states().get("copying") == 3
+
+
+def test_poll_list_error_retries_then_deletes_both_sides(tmp_path):
+    """需求 2: GetCopyTasks 报错 -> 单轮重试 3 次、错误经 poll_error
+    暴露; 连续 3 个周期失败后按库存路径删 CD2 任务 + 本地记录。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake)
+    engine.run_once()
+    assert store.count_states().get("copying") == 3
+    fake.list_error = "模拟 GetCopyTasks 失败"
+    res = engine.poll_copy_tasks()
+    assert fake.list_calls == 3  # 单轮内重试 3 次
+    assert res["poll_error"]["count"] == 1
+    assert engine.poll_error["count"] == 1
+    # 阈值未到: 不删任何东西
+    assert store.count_states().get("copying") == 3
+    assert fake.cancelled == [] and fake.removed_keys == []
+    engine.poll_copy_tasks()
+    assert engine.poll_error["count"] == 2
+    assert store.count_states().get("copying") == 3
+    res = engine.poll_copy_tasks()
+    assert res["deleted"] == 3
+    assert store.count_states().get("copying") is None
+    # 双侧都删: CD2 侧逐项 Cancel + Remove (按库存路径拼的 key)
+    assert len(fake.cancelled) == 3
+    assert set(fake.removed_keys) == {
+        "/A/movie1.mkv:/B",
+        "/A/Season 1/ep1.mkv:/B/Season 1",
+        "/A/Season 1/ep2.mkv:/B/Season 1",
+    }
+    assert fake.copy_tasks == []
+    rows = [t for t in store.list_tasks() if t["status"] == "failed"]
+    assert len(rows) == 3
+    assert all("持续报错" in (t["error"] or "") for t in rows)
+    # 删除完成后计数清零, 不重复触发
+    assert engine.poll_error is None
+
+
+def test_status_includes_poll_error(tmp_path):
+    """需求 2 (插件层): /status 返回 poll_error, 无错误时为 None。"""
+    spec = importlib.util.spec_from_file_location(
+        "plugin_main_pollerr", PLUGIN_DIR / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["plugin_main_pollerr"] = mod
+    spec.loader.exec_module(mod)
+    plugin = mod.CloudDrive2Sync()
+    plugin._data_path_override = str(tmp_path)
+    plugin.init_plugin({"enabled": True, "tasks": [
+        {"id": "t1", "name": "任务一", "mode": "sync",
+         "source_path": "/A", "target_path": "/B"}]})
+    assert plugin.api_status()["poll_error"] is None
+    fake = FakeCd2Client()
+    fake.list_error = "模拟列表接口失败"
+    plugin._client = fake
+    plugin._engine.client = fake
+    plugin._store.upsert_copying(
+        state_key=store_mod.state_key_of("t1", "f1", "/A/a.mkv"),
+        task_id="t1", source_path="/A/a.mkv", source_file_id="f1",
+        size=1, check_value="h", target_path="/B/a.mkv")
+    plugin.run_poll()
+    err = plugin.api_status()["poll_error"]
+    assert err and err["count"] == 1
+    assert "模拟列表接口失败" in err["error"]
+    plugin.stop_service()
+
+
+def test_poll_top_up_refills_slots(tmp_path):
+    """需求 3 (10->8 的缩小版): 上限 3、在传 3, 完成 1 个后
+    下次轮询从待提交队列补齐回 3, 不等下一轮扫描。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    fake.add_dir("/A")
+    fake.add_dir("/B")
+    for i in range(5):
+        fake.add_file("A/f%d.mkv" % i, size=100 + i,
+                      check="sha1:%d" % i, fid="f%d" % i)
+    engine, store = make_engine(tmp_path, fake)
+    engine.config.tasks[0].max_concurrent_sync = 3
+    engine.run_once()
+    assert fake.copy_calls == 3
+    assert store.count_states().get("copying") == 3
+    # 只完成第 1 个任务 (在传 3 -> 2)
+    first = fake.copy_tasks[0]
+    first.status = 3
+    first.uploaded_files = first.total_files
+    first.uploaded_bytes = first.total_bytes
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 1
+    assert fake.copy_calls == 4  # 队列补交 1 个
+    assert store.count_states().get("copying") == 3
+    # 再完成 1 个 -> 再补 1 个, 队列见底
+    second = [t for t in fake.copy_tasks if t.status != 3][0]
+    second.status = 3
+    second.uploaded_files = second.total_files
+    second.uploaded_bytes = second.total_bytes
+    engine.poll_copy_tasks()
+    assert fake.copy_calls == 5
+    assert store.count_states().get("done") == 2
+    assert store.count_states().get("copying") == 3
+    fake.complete_tasks()
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") == 5
+
+
+def test_poll_early_scan_throttled_then_triggered(tmp_path):
+    """需求 3: 队列空但有名额时提前扫描补新文件, 但距上次扫描
+    不足 5 分钟不重复触发。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    seed(fake)
+    engine, store = make_engine(tmp_path, fake)
+    task_id = engine.config.tasks[0].id
+    engine.config.tasks[0].max_concurrent_sync = 2
+    engine.run_once()
+    assert fake.copy_calls == 2  # 第 3 个在队列里
+    fake.complete_tasks()
+    engine.poll_copy_tasks()
+    # 对账完成 2 个 + 队列补交第 3 个; 名额仍空 1 个,
+    # 但刚扫描过 (<5 分钟), 不提前扫描
+    assert store.count_states().get("done") == 2
+    assert fake.copy_calls == 3
+    # 新增一个源文件, 并把上次扫描时间拨到 5 分钟前
+    fake.add_file("A/new.mkv", size=50, check="sha1:new", fid="fnew")
+    engine._last_scan_at[task_id] -= 301
+    fake.complete_tasks()
+    engine.poll_copy_tasks()
+    # 第 3 个完成结算 + 提前扫描发现新文件并提交
+    assert store.count_states().get("done") == 3
+    assert fake.copy_calls == 4
+    assert store.count_states().get("copying") == 1
+
+
+def test_stalled_failed_files_treated_as_failed(tmp_path):
+    """需求 4 / S01E05: CD2 任务级状态还是已扫描 (Scanned),
+    但 failed_files=1 且连续 2 个轮询无进展 -> 按失败处理
+    (记失败 + RestartCopyTask), 不再无限期显示同步中。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    fake.add_dir("/A")
+    fake.add_dir("/B")
+    fake.add_file("A/e05.mkv", size=100, check="sha1:e05", fid="fe05")
+    engine, store = make_engine(tmp_path, fake, max_retries=5)
+    engine.run_once()
+    assert store.count_states().get("copying") == 1
+    task = fake.copy_tasks[0]
+    task.status = 2  # Scanned
+    task.failed_files = 1
+    task.uploaded_bytes = 0
+    task.uploaded_files = 0
+    task.errors = ["模拟单文件失败"]
+    engine.poll_copy_tasks()
+    # 第 1 个无进展轮询: 还在观察, 不判失败
+    assert fake.restarted == []
+    assert store.count_states().get("copying") == 1
+    engine.poll_copy_tasks()
+    # 第 2 个无进展轮询: 判失败并已自动重启
+    assert fake.restarted == [("/A/e05.mkv", "/B")]
+    assert store.count_states().get("copying") == 1
+    assert any(t["status"] == "failed" for t in store.list_tasks())
+
+
+def test_poll_over_limit_deletes_and_rescans(tmp_path):
+    """需求 4: 失败超过 max_retries -> 删 CD2 任务 + 删 sync_state 行,
+    面板历史结为失败保留; 源文件还在, 下次扫描重新提交。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    fake.add_dir("/A")
+    fake.add_dir("/B")
+    fake.add_file("A/x.mkv", size=100, check="sha1:x", fid="fx")
+    engine, store = make_engine(tmp_path, fake, max_retries=1)
+    task_id = engine.config.tasks[0].id
+    key = store_mod.state_key_of(task_id, "fx", "/A/x.mkv")
+    engine.run_once()
+    fake.fail_tasks()
+    engine.poll_copy_tasks()
+    assert len(fake.restarted) == 1
+    assert store.get_state(key)["status"] == "copying"
+    fake.fail_tasks()
+    engine.poll_copy_tasks()
+    # 超限: 双侧删除, 历史保留
+    assert store.get_state(key) is None
+    assert fake.copy_tasks == []
+    assert fake.removed_keys == ["/A/x.mkv:/B"]
+    assert ("/A/x.mkv", "/B") in fake.cancelled
+    failed_rows = [t for t in store.list_tasks()
+                   if t["status"] == "failed"]
+    assert len(failed_rows) >= 1
+    # 源文件还在: 下次扫描重新提交
+    calls = fake.copy_calls
+    engine.run_once()
+    assert fake.copy_calls == calls + 1
+    assert store.get_state(key)["status"] == "copying"
+
+
+def test_identity_size_mismatch_not_matched(tmp_path):
+    """需求 5: 单文件 CD2 任务的 total_bytes 与记录大小对不上 ->
+    视为未匹配 (同路径换了文件), 不按完成结算; 过宽限后按
+    查无任务删除同步项。"""
+    fake = FakeCd2Client()
+    fake.async_mode = True
+    fake.add_dir("/A")
+    fake.add_dir("/B")
+    fake.add_file("A/s.mkv", size=100, check="sha1:s", fid="fs")
+    engine, store = make_engine(tmp_path, fake)
+    engine.run_once()
+    assert store.count_states().get("copying") == 1
+    task = fake.copy_tasks[0]
+    task.status = 3  # Completed, 但大小是另一个文件的
+    task.total_bytes = 999
+    task.uploaded_bytes = 999
+    task.uploaded_files = 1
+    engine.poll_copy_tasks()
+    assert store.count_states().get("done") is None
+    assert store.count_states().get("copying") == 1
+    _backdate_submitted(store, 601)
+    engine.poll_copy_tasks()
+    assert store.count_states().get("copying") is None
+
+
+def test_store_migration_only_done_rows(tmp_path):
+    """需求 6: 老库 (v1 无 meta) 打开时先备份, 只迁 done 行到新表,
+    旧表重命名 *_v1 保留, 写 schema_version=2; 重开不重复迁移;
+    全新安装直接是 v2。"""
+    import glob
+    import sqlite3
+
+    db_path = Path(tmp_path) / "old.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+    CREATE TABLE sync_state (
+        state_key TEXT PRIMARY KEY, task_id TEXT NOT NULL DEFAULT '',
+        source_path TEXT NOT NULL, source_file_id TEXT,
+        size INTEGER NOT NULL DEFAULT 0, check_value TEXT,
+        target_path TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'done',
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        first_seen_at REAL NOT NULL, last_seen_at REAL NOT NULL,
+        submitted_at REAL, finished_at REAL, gone_at REAL,
+        last_error TEXT);
+    CREATE TABLE sync_task (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL,
+        source_path TEXT NOT NULL, target_path TEXT NOT NULL,
+        size INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'syncing', error TEXT,
+        started_at REAL NOT NULL, finished_at REAL);
+    """)
+    now = time.time()
+    state_rows = [
+        ("k-done1", "t1", "/A/a.mkv", "f1", 10, "h1", "/B/a.mkv",
+         "done", 0, now, now, None, now, None, None),
+        ("k-done2", "t1", "/A/sub/b.mkv", "f2", 20, "h2", "/B/sub/b.mkv",
+         "done", 0, now, now, None, now, None, None),
+        ("k-copy", "t1", "/A/c.mkv", "f3", 30, "h3", "/B/c.mkv",
+         "copying", 0, now, now, now, None, None, None),
+        ("k-fail", "t1", "/A/d.mkv", "f4", 40, "h4", "/B/d.mkv",
+         "failed", 3, now, now, None, None, None, "boom"),
+    ]
+    conn.executemany(
+        "INSERT INTO sync_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        state_rows)
+    conn.executemany(
+        "INSERT INTO sync_task (task_id, file_name, source_path, "
+        "target_path, size, status, error, started_at, finished_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        [("t1", "a.mkv", "/A/a.mkv", "/B/a.mkv", 10, "done", None,
+          now, now),
+         ("t1", "d.mkv", "/A/d.mkv", "/B/d.mkv", 40, "failed", "boom",
+          now, now),
+         ("t1", "c.mkv", "/A/c.mkv", "/B/c.mkv", 30, "syncing", None,
+          now, None)])
+    conn.commit()
+    conn.close()
+
+    store = SyncStore(db_path)
+    info = store.migration_info
+    assert info is not None
+    assert info["state_migrated"] == 2 and info["state_dropped"] == 2
+    assert info["task_migrated"] == 1 and info["task_dropped"] == 2
+    # 备份文件存在
+    assert glob.glob(str(db_path) + ".bak-*")
+    assert Path(info["backup_path"]).exists()
+    with store._lock:
+        tables = {r[0] for r in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        version = store._conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert "sync_state_v1" in tables and "sync_task_v1" in tables
+    assert version == "2"
+    # 只迁了 done 行, 且 file_name 已按源路径补好
+    states = store.list_states()
+    assert {s["state_key"] for s in states} == {"k-done1", "k-done2"}
+    by_key = {s["state_key"]: s for s in states}
+    assert by_key["k-done1"]["file_name"] == "a.mkv"
+    assert by_key["k-done2"]["file_name"] == "b.mkv"
+    tasks = store.list_tasks()
+    assert len(tasks) == 1 and tasks[0]["status"] == "done"
+    store.close()
+    # 重开: 已是 v2, 不再迁移, 数据不变
+    store2 = SyncStore(db_path)
+    assert store2.migration_info is None
+    assert store2.count_states().get("done") == 2
+    store2.close()
+    # 全新安装: 直接 v2 空库
+    fresh = SyncStore(Path(tmp_path) / "fresh.db")
+    assert fresh.migration_info is None
+    assert fresh.count_states() == {}
+    with fresh._lock:
+        version = fresh._conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert version == "2"
+    fresh.close()

@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.6.4"
+    plugin_version = "0.7.0"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -107,6 +107,18 @@ class CloudDrive2Sync(_PluginBase):
             return
         db_path = self.get_data_path() / "clouddrive2sync.db"
         self._store = SyncStore(db_path)
+        migration = getattr(self._store, "migration_info", None)
+        if migration:
+            logger.info(
+                "[CloudDrive2Sync] 数据库已升级到 schema v2 (仅迁移同步"
+                "成功的数据): 同步记录迁移 %d 条/丢弃 %d 条, 面板历史迁移 "
+                "%d 条/丢弃 %d 条, 迁移前备份在 %s, 旧表保留为 *_v1",
+                migration.get("state_migrated", 0),
+                migration.get("state_dropped", 0),
+                migration.get("task_migrated", 0),
+                migration.get("task_dropped", 0),
+                migration.get("backup_path", ""),
+            )
         self._client = Cd2GrpcClient(
             self._config.cd2_address,
             token=self._config.cd2_token,
@@ -432,6 +444,11 @@ class CloudDrive2Sync(_PluginBase):
             "tasks": tasks,
             "states": self._store.count_states() if self._store else {},
             "config": self._config.to_dict() if self._config else {},
+            # GetCopyTasks 连续失败状态 (需求 2): 无错误时为 None,
+            # 前端据此在总览顶部显示错误横条
+            "poll_error": (
+                self._engine.poll_error if self._engine else None
+            ),
         }
 
     def api_files(self, task_id: str = None, status: str = None,

@@ -408,6 +408,10 @@ onUnmounted(() => {
             {{ selected.source_path }} → {{ selected.target_path }}
           </div>
 
+          <v-alert v-if="status.poll_error" type="error" variant="tonal" class="mb-3">
+            CD2 复制任务列表读取失败（已连续失败 {{ status.poll_error.count }} 个轮询周期）：{{ status.poll_error.error }}
+          </v-alert>
+
           <v-alert v-if="message" type="info" variant="tonal" class="mb-3">{{ message }}</v-alert>
 
           <v-tabs v-model="tab" density="compact" class="mb-3">
