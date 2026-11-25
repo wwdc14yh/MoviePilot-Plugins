@@ -846,10 +846,12 @@ class SyncEngine:
         self._ensured_dirs = set()
 
         self._debug(
-            "任务[%s]开始: 模式=%s 源=%s 目标=%s 并发=%d 冲突策略=%s"
+            "任务[%s]开始: 模式=%s 源=%s 目标=%s 并发=%d 冲突策略=%s "
+            "仅同步后缀=%s"
             % (task.name, task.mode, source_root, target_root,
                max(1, int(getattr(task, "max_concurrent_sync", 1) or 1)),
-               task.conflict_policy or cfg.conflict_policy or "skip")
+               task.conflict_policy or cfg.conflict_policy or "skip",
+               task.allowed_suffixes or "全部")
         )
 
         self._last_scan_at[task.id] = time.time()
@@ -869,8 +871,18 @@ class SyncEngine:
             target_path = _join(target_root, rel)
             target_dir, _ = parent_and_name(target_path)
             key = state_key_of(task.id, src.id, src.full_path)
+            # 先记入 seen_keys 再过滤: 被后缀排除的文件只是本任务不
+            # 同步, 源还在, 绝不能因此被 mark_missing_as_gone 标为
+            # 源端消失; 已在同步中的也不受影响, 由轮询继续结算。
             seen_keys.add(key)
             state = self.store.get_state(key)
+
+            if not task.suffix_allowed(src.name):
+                self._debug("跳过不在允许后缀内的文件 %s (仅同步: %s)"
+                            % (src.full_path,
+                               task.allowed_suffixes or "全部"))
+                tsum.skipped += 1
+                continue
 
             if state and state.get("status") == "copying":
                 continue

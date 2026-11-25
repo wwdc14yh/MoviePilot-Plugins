@@ -59,7 +59,27 @@ _TASK_FIELDS = (
     "delete_empty_dirs",
     "max_concurrent_sync",
     "interval_minutes",
+    "allowed_suffixes",
 )
+
+
+def parse_allowed_suffixes(value):
+    """解析任务级允许后缀: 逗号隔开, 点可写可不写, 不区分大小写。
+
+    返回归一化后的后缀集合 (不带点, 全小写); 空字符串/None ->
+    空集合, 表示不限制, 同步所有后缀。
+    """
+    result = set()
+    for part in str(value or "").replace("，", ",").split(","):
+        suffix = part.strip().lstrip(".").strip().lower()
+        if suffix:
+            result.add(suffix)
+    return result
+
+
+def normalize_allowed_suffixes(value):
+    """把允许后缀写回统一形式: "mkv,mp4,srt", 空 = 全部。"""
+    return ",".join(sorted(parse_allowed_suffixes(value)))
 
 
 @dataclass
@@ -76,6 +96,22 @@ class SyncTask:
     delete_empty_dirs: bool = False  # 仅 move 模式: 删源文件后清理空目录
     max_concurrent_sync: int = 1  # 每轮最多同时进行的文件同步数 (本任务独立)
     interval_minutes: int = 30  # 本任务的扫描间隔 (分钟, 独立调度)
+    allowed_suffixes: str = ""  # 仅同步的后缀名, 逗号隔开 (如 mkv,mp4);
+    # 空 = 不限制, 同步所有后缀; 点可写可不写, 不区分大小写
+
+    def allowed_suffix_set(self):
+        return parse_allowed_suffixes(self.allowed_suffixes)
+
+    def suffix_allowed(self, file_name):
+        """文件名是否在允许后缀内: 不限制 -> 全部允许; 否则只看
+        最后一个点后的后缀 (无后缀的文件不在允许列表内)。"""
+        allowed = self.allowed_suffix_set()
+        if not allowed:
+            return True
+        name = str(file_name or "")
+        if "." not in name or name.endswith("."):
+            return False
+        return name.rsplit(".", 1)[-1].lower() in allowed
 
     @classmethod
     def from_dict(cls, data):
@@ -89,6 +125,8 @@ class SyncTask:
             task.max_concurrent_sync = int(task.max_concurrent_sync or 1)
         except (TypeError, ValueError):
             task.max_concurrent_sync = 1
+        task.allowed_suffixes = normalize_allowed_suffixes(
+            task.allowed_suffixes)
         if task.max_concurrent_sync < 1:
             task.max_concurrent_sync = 1
         try:

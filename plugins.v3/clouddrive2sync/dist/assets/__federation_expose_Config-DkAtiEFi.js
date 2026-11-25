@@ -61,6 +61,7 @@ function newTask() {
     delete_empty_dirs: false,
     max_concurrent_sync: 1,
     interval_minutes: 30,
+    allowed_suffixes: '',
   }
 }
 
@@ -402,6 +403,22 @@ return (_ctx, _cache) => {
                         type: "number",
                         min: "1",
                         label: "同步线程"
+                      }, null, 8, ["modelValue", "onUpdate:modelValue"])
+                    ]),
+                    _: 2
+                  }, 1024),
+                  _createVNode(_component_v_col, {
+                    cols: "12",
+                    md: "8"
+                  }, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_text_field, {
+                        modelValue: task.allowed_suffixes,
+                        "onUpdate:modelValue": $event => ((task.allowed_suffixes) = $event),
+                        label: "仅同步这些后缀名",
+                        placeholder: "mkv,mp4,srt",
+                        hint: "逗号隔开, 不填同步全部; 带不带点都行, 不区分大小写",
+                        "persistent-hint": ""
                       }, null, 8, ["modelValue", "onUpdate:modelValue"])
                     ]),
                     _: 2

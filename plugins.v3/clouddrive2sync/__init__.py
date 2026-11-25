@@ -85,7 +85,7 @@ class CloudDrive2Sync(_PluginBase):
     plugin_name = "CloudDrive2 网盘增量同步"
     plugin_desc = "基于 CloudDrive2 gRPC API 的 A 网盘到 B 网盘增量同步, 异步复制跨轮校验, 不走本地中转。"
     plugin_icon = "CloudDrive2.png"
-    plugin_version = "0.7.1"
+    plugin_version = "0.7.2"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "clouddrive2sync_"
@@ -436,6 +436,7 @@ class CloudDrive2Sync(_PluginBase):
                         "delete_empty_dirs": task.delete_empty_dirs,
                         "max_concurrent_sync": task.max_concurrent_sync,
                         "interval_minutes": task.interval_minutes,
+                        "allowed_suffixes": task.allowed_suffixes,
                         "states": (
                             self._store.count_states(task.id)
                             if self._store
@@ -543,7 +544,8 @@ class CloudDrive2Sync(_PluginBase):
                       target_path: str = "", conflict_policy: str = "",
                       delete_empty_dirs: bool = False,
                       max_concurrent_sync: int = 1,
-                      interval_minutes: int = 30):
+                      interval_minutes: int = 30,
+                      allowed_suffixes: str = ""):
         """新建任务 (无 id 或 id 不存在) 或更新已有任务 (id 命中)。
 
         参数必须是显式标量: 宿主把插件 API 注册为 FastAPI 路由,
@@ -557,6 +559,7 @@ class CloudDrive2Sync(_PluginBase):
             "delete_empty_dirs": delete_empty_dirs,
             "max_concurrent_sync": max_concurrent_sync,
             "interval_minutes": interval_minutes,
+            "allowed_suffixes": allowed_suffixes,
         }
         if self._config is None:
             return {"ok": False, "error": "插件未初始化"}
