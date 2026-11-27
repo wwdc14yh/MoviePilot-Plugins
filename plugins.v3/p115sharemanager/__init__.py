@@ -61,16 +61,18 @@ except Exception:  # pragma: no cover
 
 try:
     from .config import (COMPLETION_RULE_TITLES, DEFAULT_CRON,
-                         _GLOBAL_FIELDS, _as_bool_or_none, ShareConfig,
-                         ShareTask, validate_cron)
+                         _GLOBAL_FIELDS, _as_bool_or_none, _as_int,
+                         _as_rule_or_none,
+                         ShareConfig, ShareTask, validate_cron)
     from .p115_client import P115ClientWrapper, P115Error
     from .share_engine import ShareEngine
     from .store import ShareStore
     from .tmdb import TmdbClient
 except ImportError:  # 直接以顶层模块加载时
     from config import (COMPLETION_RULE_TITLES, DEFAULT_CRON,
-                        _GLOBAL_FIELDS, _as_bool_or_none, ShareConfig,
-                        ShareTask, validate_cron)
+                        _GLOBAL_FIELDS, _as_bool_or_none, _as_int,
+                        _as_rule_or_none,
+                        ShareConfig, ShareTask, validate_cron)
     from p115_client import P115ClientWrapper, P115Error
     from share_engine import ShareEngine
     from store import ShareStore
@@ -107,7 +109,7 @@ class P115ShareManager(_PluginBase):
     plugin_desc = "监听 115 网盘剧集, TMDB 判完结后自动复制到临时路径、" \
         "英文重命名、创建长期分享并推送到 Telegram 频道, 随后按配置删除或保留源文件夹。"
     plugin_icon = "P115ShareManager.png"
-    plugin_version = "0.1.10"
+    plugin_version = "0.1.12"
     plugin_author = "Hu"
     author_url = ""
     plugin_config_prefix = "p115sharemanager_"
@@ -444,6 +446,10 @@ class P115ShareManager(_PluginBase):
                     "delete_source_effective":
                         task.effective_delete_source(
                             self._config.delete_source),
+                    "completion_rule": task.completion_rule,
+                    "completion_rule_effective":
+                        task.effective_completion_rule(
+                            self._config.completion_rule),
                     "counts": (self._store.count_jobs(task.id)
                                if self._store else {}),
                 })
@@ -514,22 +520,42 @@ class P115ShareManager(_PluginBase):
 
     def api_save_task(self, id: str = "", name: str = "",
                       watch_path: str = "", enabled: bool = True,
-                      cron: str = "", delay_hours: int = None,
-                      delete_source: str = ""):
+                      cron: str = "", delay_hours: str = "",
+                      delete_source: str = "", completion_rule: str = ""):
         """新建任务 (无 id 或 id 不存在) 或更新已有任务 (id 命中)。
         参数必须是显式标量: 宿主把插件 API 注册为 FastAPI 路由,
         dict 参数和 **kwargs 都会被 FastAPI 判为参数不正确 (422)。
-        delete_source: "global" (跟随全局) / "yes" / "no"。"""
+        delay_hours 用 str 接收: 前端新建任务留空会发 delay_hours=
+        (空字符串), int 参数会在 FastAPI 校验层直接 422; 空 = 跟随
+        全局, 数字照常解析, 非数字返回可读错误 (v0.1.11 修复)。
+        delete_source: "global" (跟随全局) / "yes" / "no"。
+        completion_rule: "" / "global" (跟随全局, 存量任务默认) /
+        "season" / "show", 其它值返回可读错误。"""
         if self._config is None:
             return {"ok": False, "error": "插件未初始化"}
         if cron:
             ok, err = validate_cron(cron)
             if not ok:
                 return {"ok": False, "error": err}
+        delay = None
+        if delay_hours is not None and str(delay_hours).strip() != "":
+            delay = _as_int(delay_hours, None)
+            if delay is None:
+                return {"ok": False, "error": "延迟分享小时数必须是数字"}
+            if delay < 0:
+                delay = 0
+        rule = _as_rule_or_none(completion_rule)
+        if completion_rule is not None and str(completion_rule).strip() != "":
+            # "global" 合法 (解析为 None); 其它解析不到的才是脏值
+            text = str(completion_rule).strip().lower()
+            if text not in ("global", "season", "show"):
+                return {"ok": False,
+                        "error": "完结检查规则只能是跟随全局、按季或按整剧"}
         data = {"id": id, "name": name, "enabled": enabled,
                 "watch_path": watch_path, "cron": cron,
-                "delay_hours": delay_hours,
-                "delete_source": _as_bool_or_none(delete_source)}
+                "delay_hours": delay,
+                "delete_source": _as_bool_or_none(delete_source),
+                "completion_rule": rule}
         new_task = ShareTask.from_dict(data)
         if not new_task.watch_path:
             return {"ok": False, "error": "监听路径必填"}

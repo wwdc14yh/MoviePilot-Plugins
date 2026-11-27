@@ -80,6 +80,7 @@ _TASK_FIELDS = (
     "cron",
     "delay_hours",
     "delete_source",
+    "completion_rule",
 )
 
 # cron 每段取值范围: 分 时 日 月 周
@@ -150,6 +151,21 @@ def _as_int(value, default):
         return default
 
 
+def _as_rule_or_none(value):
+    """任务级完结规则三态: None/''/'global' = 跟随全局,
+    'season'/'show' = 本任务指定; 其它值 (含旧数据脏值) 视为跟随全局。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "global", "none", "null"):
+            return None
+        if text in COMPLETION_RULES:
+            return text
+        return None
+    return None
+
+
 @dataclass
 class ShareTask:
     """一个监听任务: 一个 115 路径 + 独立检查频率。"""
@@ -161,6 +177,7 @@ class ShareTask:
     cron: str = ""  # 空 = 用全局默认
     delay_hours: int | None = None  # None = 用全局延迟
     delete_source: bool | None = None  # None = 跟随全局
+    completion_rule: str | None = None  # None = 跟随全局 (存量任务默认)
 
     @classmethod
     def from_dict(cls, data):
@@ -174,6 +191,7 @@ class ShareTask:
         else:
             task.delay_hours = None
         task.delete_source = _as_bool_or_none(task.delete_source)
+        task.completion_rule = _as_rule_or_none(task.completion_rule)
         task.cron = (task.cron or "").strip()
         if task.cron:
             ok, _ = validate_cron(task.cron)
@@ -201,6 +219,15 @@ class ShareTask:
         if self.delete_source is None:
             return bool(global_delete_source)
         return bool(self.delete_source)
+
+    def effective_completion_rule(self, global_rule):
+        """本任务的完结检查规则: 未指定 (None, 存量任务默认) 时
+        跟随全局; 全局非法值也回落到默认按季分享。"""
+        if self.completion_rule in COMPLETION_RULES:
+            return self.completion_rule
+        if global_rule in COMPLETION_RULES:
+            return global_rule
+        return "season"
 
 
 def _parse_tasks(raw):

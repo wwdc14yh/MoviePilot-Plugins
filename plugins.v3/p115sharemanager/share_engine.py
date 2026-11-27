@@ -263,7 +263,8 @@ class ShareEngine:
                     task, show, tmdbid, season_no, files, info, en_title,
                     tmdb_status, poster_url, summary)
             return
-        if self.config.completion_rule == "show":
+        if task.effective_completion_rule(
+                self.config.completion_rule) == "show":
             self._judge_show_unit(
                 task, show, tmdbid, season_dirs, info, en_title,
                 tmdb_status, poster_url, summary)
@@ -623,12 +624,15 @@ class ShareEngine:
         return self.client.getid(temp_show_dir)
 
     def _reverify(self, task, job, unit):
-        """分享前复核: TMDB 仍完结 + 115 源文件仍在且集数一致。"""
+        """分享前复核: TMDB 仍完结 + 115 源文件仍在且集数一致。
+        分支按作业自身的模式 (season_number == -1 即整剧作业),
+        不按当前任务规则: 任务规则中途改了也不应让在途作业走错
+        分支 (如整剧作业按季复核会去查第 -1 季)。"""
         try:
             info, _ = self.tmdb.get_show(job["tmdbid"])
         except TmdbError as exc:
             return False, "复核 TMDB 失败: %s" % exc
-        if self.config.completion_rule == "show":
+        if job["season_number"] == -1:
             if info.get("status") != "Ended":
                 return False, "复核: 整剧未 Ended, 退回监听"
             return True, ""

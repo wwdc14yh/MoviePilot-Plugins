@@ -6,7 +6,7 @@ MoviePilot V3 个人插件仓库，包含三个插件：
 |---|---|---|---|
 | CloudDrive2 网盘增量同步 | `CloudDrive2Sync` | 0.7.2 | 多任务 CloudDrive2 A盘→B盘增量同步，基于 CD2 gRPC API，Vue 前端 |
 | 磁盘清理（目录限额版） | `DiskCleanerDirLimit` | 3.1.1 | 基于逗猫 DiskCleaner v3.0.1 修改，新增按下载目录大小上限精确清理 |
-| 115 剧集分享管家 | `P115-ShareManager` | 0.1.10 | 监听 115 剧目录，TMDB 判完结后自动分享到 TG 频道 |
+| 115 剧集分享管家 | `P115-ShareManager` | 0.1.12 | 监听 115 剧目录，TMDB 判完结后自动分享到 TG 频道 |
 
 ## 使用方法
 

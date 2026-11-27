@@ -48,6 +48,11 @@ const deleteSourceItems = [
   { title: '删除源文件', value: true },
   { title: '保留源文件', value: false },
 ];
+const completionRuleTaskItems = [
+  { title: '跟随全局', value: '' },
+  { title: '按季完结分享', value: 'season' },
+  { title: '按整剧完结分享', value: 'show' },
+];
 
 function newTask() {
   return {
@@ -58,6 +63,7 @@ function newTask() {
     cron: '',
     delay_hours: '',
     delete_source: '',
+    completion_rule: '',
   }
 }
 
@@ -72,6 +78,10 @@ function normalize(cfg) {
   if (typeof c.delete_source !== 'boolean') c.delete_source = true;
   if (typeof c.share_interval_seconds !== 'number'
       || c.share_interval_seconds < 0) c.share_interval_seconds = 60;
+  // 任务级完结规则: 存量任务没有该字段时 newTask() 已补 '', 脏值也归一化
+  c.tasks.forEach(t => {
+    if (!['', 'season', 'show'].includes(t.completion_rule)) t.completion_rule = '';
+  });
   return c
 }
 
@@ -682,6 +692,22 @@ return (_ctx, _cache) => {
                         "onUpdate:modelValue": $event => ((task.delete_source) = $event),
                         items: deleteSourceItems,
                         label: "分享后删除源文件",
+                        hint: "留空 = 跟随全局",
+                        "persistent-hint": ""
+                      }, null, 8, ["modelValue", "onUpdate:modelValue"])
+                    ]),
+                    _: 2
+                  }, 1024),
+                  _createVNode(_component_v_col, {
+                    cols: "12",
+                    md: "3"
+                  }, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_select, {
+                        modelValue: task.completion_rule,
+                        "onUpdate:modelValue": $event => ((task.completion_rule) = $event),
+                        items: completionRuleTaskItems,
+                        label: "剧集完结检查规则",
                         hint: "留空 = 跟随全局",
                         "persistent-hint": ""
                       }, null, 8, ["modelValue", "onUpdate:modelValue"])

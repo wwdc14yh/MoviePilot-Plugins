@@ -148,6 +148,11 @@ const completionRuleHints = {
   season: '某季网盘集数 = TMDB 该季集数即分享该季, 不要求整剧完结 (如 S1 已完结、S2 在更时分享 S1)。',
   show: '整剧完结才分享: 要求 TMDB status=Ended, 并且全部季的网盘集数都 = TMDB 集数。',
 };
+const completionRuleTaskItems = [
+  { title: '跟随全局', value: 'global' },
+  { title: '按季完结分享', value: 'season' },
+  { title: '按整剧完结分享', value: 'show' },
+];
 const deleteSourceItems = [
   { title: '跟随全局', value: 'global' },
   { title: '删除源文件', value: 'yes' },
@@ -179,7 +184,7 @@ const jobFilterItems = [
 const pageSizeItems = [10, 20, 50, 100];
 
 function blankTask() {
-  return { id: '', name: '', watch_path: '', enabled: true, cron: '', delay_hours: '', delete_source: 'global' }
+  return { id: '', name: '', watch_path: '', enabled: true, cron: '', delay_hours: '', delete_source: 'global', completion_rule: 'global' }
 }
 function openNewTask() {
   taskDialog.value = { show: true, editing: null, form: blankTask() };
@@ -190,6 +195,8 @@ function openEditTask() {
   // 后端存的是三态 (true/false/null), 表单下拉用 global/yes/no
   form.delete_source = selected.value.delete_source === true ? 'yes'
     : selected.value.delete_source === false ? 'no' : 'global';
+  // 完结规则也是三态 (season/show/null), 表单下拉用 global/season/show
+  form.completion_rule = selected.value.completion_rule || 'global';
   taskDialog.value = {
     show: true,
     editing: selected.value.id,
@@ -206,7 +213,13 @@ async function saveTask() {
     // 宿主把插件 API 注册为 FastAPI 路由: 只认查询参数,
     // JSON body / dict 参数会被判为请求参数不正确, 故一律拼查询串
     const params = new URLSearchParams();
-    for (const [k, v] of Object.entries(form)) params.set(k, String(v ?? ''));
+    for (const [k, v] of Object.entries(form)) {
+      // 空值不发: 新建任务延迟留空会发 delay_hours=, FastAPI 的
+      // int 参数校验直接 422; 不发则后端用默认值 (跟随全局)。
+      // cron/name/id 为空时不发与发空串等价, 后端默认值就是空串。
+      if (v === '' || v === null || v === undefined) continue
+      params.set(k, String(v));
+    }
     const res = unwrap(await props.api.post(
       `plugin/${props.pluginId}/save_task?${params.toString()}`,
     ));
@@ -274,7 +287,14 @@ function openGlobal() {
 async function saveGlobal() {
   try {
     const params = new URLSearchParams();
+    // 数字项清空时不发 (同 saveTask 的 422 陷阱: 空串发给 int 参数
+    // 会在 FastAPI 校验层报错; 不发 = 保持原值)。字符串项的空值
+    // 仍要发, 表示清空 (如 Token)。
+    const numericKeys = new Set(['delay_hours', 'max_retries',
+      'history_retention_days', 'share_interval_seconds']);
     for (const [k, v] of Object.entries(globalDialog.value.form)) {
+      if ((v === '' || v === null || v === undefined)
+          && numericKeys.has(k)) continue
       params.set(k, String(v ?? ''));
     }
     const res = unwrap(await props.api.post(
@@ -303,7 +323,6 @@ const historyPageCount = computed(() =>
   Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)),
 );
 const login = computed(() => status.value.login || {});
-const completionRule = computed(() => status.value.config?.completion_rule || 'season');
 
 function unwrap(res) {
   return res && res.data !== undefined ? res.data : res
@@ -526,12 +545,12 @@ return (_ctx, _cache) => {
         color: "primary",
         class: "mr-2"
       }, {
-        default: _withCtx(() => [...(_cache[50] || (_cache[50] = [
+        default: _withCtx(() => [...(_cache[51] || (_cache[51] = [
           _createTextVNode("mdi-share-variant", -1)
         ]))]),
         _: 1
       }),
-      _cache[57] || (_cache[57] = _createElementVNode("div", { class: "p115-header-title" }, [
+      _cache[58] || (_cache[58] = _createElementVNode("div", { class: "p115-header-title" }, [
         _createElementVNode("div", { class: "text-subtitle-1 font-weight-medium" }, "115 剧集分享管家"),
         _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "完结剧集自动打包分享并推送到 TG 频道")
       ], -1)),
@@ -554,7 +573,7 @@ return (_ctx, _cache) => {
             class: "ml-2"
           }, {
             default: _withCtx(() => [
-              _cache[51] || (_cache[51] = _createTextVNode(" 115 已登录", -1)),
+              _cache[52] || (_cache[52] = _createTextVNode(" 115 已登录", -1)),
               (login.value.user_name)
                 ? (_openBlock(), _createElementBlock("span", _hoisted_3, "：" + _toDisplayString(login.value.user_name), 1))
                 : _createCommentVNode("", true)
@@ -568,7 +587,7 @@ return (_ctx, _cache) => {
             variant: "tonal",
             class: "ml-2"
           }, {
-            default: _withCtx(() => [...(_cache[52] || (_cache[52] = [
+            default: _withCtx(() => [...(_cache[53] || (_cache[53] = [
               _createTextVNode(" 115 未登录 ", -1)
             ]))]),
             _: 1
@@ -580,7 +599,7 @@ return (_ctx, _cache) => {
         "prepend-icon": "mdi-qrcode",
         onClick: _cache[0] || (_cache[0] = $event => (loginDialog.value.show = true))
       }, {
-        default: _withCtx(() => [...(_cache[53] || (_cache[53] = [
+        default: _withCtx(() => [...(_cache[54] || (_cache[54] = [
           _createTextVNode("115 登录", -1)
         ]))]),
         _: 1
@@ -591,7 +610,7 @@ return (_ctx, _cache) => {
         "prepend-icon": "mdi-tune-variant",
         onClick: openGlobal
       }, {
-        default: _withCtx(() => [...(_cache[54] || (_cache[54] = [
+        default: _withCtx(() => [...(_cache[55] || (_cache[55] = [
           _createTextVNode("全局设置", -1)
         ]))]),
         _: 1
@@ -602,7 +621,7 @@ return (_ctx, _cache) => {
         loading: loading.value,
         onClick: load
       }, {
-        default: _withCtx(() => [...(_cache[55] || (_cache[55] = [
+        default: _withCtx(() => [...(_cache[56] || (_cache[56] = [
           _createTextVNode("刷新", -1)
         ]))]),
         _: 1
@@ -613,7 +632,7 @@ return (_ctx, _cache) => {
         loading: running.value,
         onClick: _cache[1] || (_cache[1] = $event => (scanTask()))
       }, {
-        default: _withCtx(() => [...(_cache[56] || (_cache[56] = [
+        default: _withCtx(() => [...(_cache[57] || (_cache[57] = [
           _createTextVNode("立即扫描", -1)
         ]))]),
         _: 1
@@ -632,14 +651,14 @@ return (_ctx, _cache) => {
               variant: "text",
               onClick: _cache[2] || (_cache[2] = $event => (loginDialog.value.show = true))
             }, {
-              default: _withCtx(() => [...(_cache[58] || (_cache[58] = [
+              default: _withCtx(() => [...(_cache[59] || (_cache[59] = [
                 _createTextVNode("去扫码登录", -1)
               ]))]),
               _: 1
             })
           ]),
           default: _withCtx(() => [
-            _cache[59] || (_cache[59] = _createTextVNode(" 115 登录已过期, 请重新扫码登录, 否则无法监听、复制和分享 ", -1))
+            _cache[60] || (_cache[60] = _createTextVNode(" 115 登录已过期, 请重新扫码登录, 否则无法监听、复制和分享 ", -1))
           ]),
           _: 1
         }))
@@ -656,14 +675,14 @@ return (_ctx, _cache) => {
                 variant: "text",
                 onClick: _cache[3] || (_cache[3] = $event => (loginDialog.value.show = true))
               }, {
-                default: _withCtx(() => [...(_cache[60] || (_cache[60] = [
+                default: _withCtx(() => [...(_cache[61] || (_cache[61] = [
                   _createTextVNode("去扫码登录", -1)
                 ]))]),
                 _: 1
               })
             ]),
             default: _withCtx(() => [
-              _cache[61] || (_cache[61] = _createTextVNode(" 115 未登录, 请先扫码登录 ", -1))
+              _cache[62] || (_cache[62] = _createTextVNode(" 115 未登录, 请先扫码登录 ", -1))
             ]),
             _: 1
           }))
@@ -671,7 +690,7 @@ return (_ctx, _cache) => {
     _createElementVNode("div", _hoisted_4, [
       _createElementVNode("aside", _hoisted_5, [
         _createElementVNode("div", _hoisted_6, [
-          _cache[62] || (_cache[62] = _createTextVNode(" 监听任务 ", -1)),
+          _cache[63] || (_cache[63] = _createTextVNode(" 监听任务 ", -1)),
           _createVNode(_component_v_chip, {
             class: "ml-2",
             size: "x-small"
@@ -696,7 +715,7 @@ return (_ctx, _cache) => {
                   size: "x-small",
                   color: task.enabled ? 'success' : 'grey'
                 }, {
-                  default: _withCtx(() => [...(_cache[63] || (_cache[63] = [
+                  default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
                     _createTextVNode(" mdi-circle ", -1)
                   ]))]),
                   _: 1
@@ -724,7 +743,7 @@ return (_ctx, _cache) => {
             "prepend-icon": "mdi-plus",
             onClick: openNewTask
           }, {
-            default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
+            default: _withCtx(() => [...(_cache[65] || (_cache[65] = [
               _createTextVNode("新建任务", -1)
             ]))]),
             _: 1
@@ -739,7 +758,7 @@ return (_ctx, _cache) => {
                   size: "large",
                   color: "primary"
                 }, {
-                  default: _withCtx(() => [...(_cache[65] || (_cache[65] = [
+                  default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
                     _createTextVNode("mdi-television-classic", -1)
                   ]))]),
                   _: 1
@@ -759,7 +778,7 @@ return (_ctx, _cache) => {
                   variant: "tonal"
                 }, {
                   default: _withCtx(() => [
-                    _createTextVNode(_toDisplayString(completionRuleItems.find(r => r.value === completionRule.value)?.title || '按季完结分享'), 1)
+                    _createTextVNode(_toDisplayString(completionRuleItems.find(r => r.value === selected.value.completion_rule_effective)?.title || '按季完结分享'), 1)
                   ]),
                   _: 1
                 }),
@@ -771,7 +790,7 @@ return (_ctx, _cache) => {
                   loading: running.value,
                   onClick: _cache[4] || (_cache[4] = $event => (scanTask(selected.value.id)))
                 }, {
-                  default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
+                  default: _withCtx(() => [...(_cache[67] || (_cache[67] = [
                     _createTextVNode("立即扫描", -1)
                   ]))]),
                   _: 1
@@ -781,7 +800,7 @@ return (_ctx, _cache) => {
                   "prepend-icon": "mdi-pencil",
                   onClick: openEditTask
                 }, {
-                  default: _withCtx(() => [...(_cache[67] || (_cache[67] = [
+                  default: _withCtx(() => [...(_cache[68] || (_cache[68] = [
                     _createTextVNode("编辑任务", -1)
                   ]))]),
                   _: 1
@@ -792,7 +811,7 @@ return (_ctx, _cache) => {
                   "prepend-icon": "mdi-delete",
                   onClick: _cache[5] || (_cache[5] = $event => (taskConfirmDelete.value.show = true))
                 }, {
-                  default: _withCtx(() => [...(_cache[68] || (_cache[68] = [
+                  default: _withCtx(() => [...(_cache[69] || (_cache[69] = [
                     _createTextVNode("删除任务", -1)
                   ]))]),
                   _: 1
@@ -820,13 +839,13 @@ return (_ctx, _cache) => {
               }, {
                 default: _withCtx(() => [
                   _createVNode(_component_v_tab, { value: "jobs" }, {
-                    default: _withCtx(() => [...(_cache[69] || (_cache[69] = [
+                    default: _withCtx(() => [...(_cache[70] || (_cache[70] = [
                       _createTextVNode("剧集", -1)
                     ]))]),
                     _: 1
                   }),
                   _createVNode(_component_v_tab, { value: "history" }, {
-                    default: _withCtx(() => [...(_cache[70] || (_cache[70] = [
+                    default: _withCtx(() => [...(_cache[71] || (_cache[71] = [
                       _createTextVNode("分享历史", -1)
                     ]))]),
                     _: 1
@@ -846,9 +865,9 @@ return (_ctx, _cache) => {
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, null, {
                               default: _withCtx(() => [
-                                _cache[71] || (_cache[71] = _createElementVNode("div", { class: "text-caption" }, "待完结", -1)),
+                                _cache[72] || (_cache[72] = _createElementVNode("div", { class: "text-caption" }, "待完结", -1)),
                                 _createElementVNode("div", _hoisted_22, _toDisplayString(selected.value.counts?.watching || 0), 1),
-                                _cache[72] || (_cache[72] = _createElementVNode("div", { class: "text-caption" }, "集数未齐或未到播出日", -1))
+                                _cache[73] || (_cache[73] = _createElementVNode("div", { class: "text-caption" }, "集数未齐或未到播出日", -1))
                               ]),
                               _: 1
                             })
@@ -859,9 +878,9 @@ return (_ctx, _cache) => {
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, null, {
                               default: _withCtx(() => [
-                                _cache[73] || (_cache[73] = _createElementVNode("div", { class: "text-caption" }, "待分享", -1)),
+                                _cache[74] || (_cache[74] = _createElementVNode("div", { class: "text-caption" }, "待分享", -1)),
                                 _createElementVNode("div", _hoisted_23, _toDisplayString(selected.value.counts?.pending_delay || 0), 1),
-                                _cache[74] || (_cache[74] = _createElementVNode("div", { class: "text-caption" }, "已完结, 在延迟分享期内", -1))
+                                _cache[75] || (_cache[75] = _createElementVNode("div", { class: "text-caption" }, "已完结, 在延迟分享期内", -1))
                               ]),
                               _: 1
                             })
@@ -872,9 +891,9 @@ return (_ctx, _cache) => {
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, null, {
                               default: _withCtx(() => [
-                                _cache[75] || (_cache[75] = _createElementVNode("div", { class: "text-caption" }, "已分享", -1)),
+                                _cache[76] || (_cache[76] = _createElementVNode("div", { class: "text-caption" }, "已分享", -1)),
                                 _createElementVNode("div", _hoisted_24, _toDisplayString(selected.value.counts?.done || 0), 1),
-                                _cache[76] || (_cache[76] = _createElementVNode("div", { class: "text-caption" }, "已分享并推送到 TG 频道", -1))
+                                _cache[77] || (_cache[77] = _createElementVNode("div", { class: "text-caption" }, "已分享并推送到 TG 频道", -1))
                               ]),
                               _: 1
                             })
@@ -885,11 +904,11 @@ return (_ctx, _cache) => {
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, null, {
                               default: _withCtx(() => [
-                                _cache[77] || (_cache[77] = _createElementVNode("div", { class: "text-caption" }, "失败", -1)),
+                                _cache[78] || (_cache[78] = _createElementVNode("div", { class: "text-caption" }, "失败", -1)),
                                 _createElementVNode("div", {
                                   class: _normalizeClass(["text-h5", selected.value.counts?.failed ? 'text-error' : ''])
                                 }, _toDisplayString(selected.value.counts?.failed || 0), 3),
-                                _cache[78] || (_cache[78] = _createElementVNode("div", { class: "text-caption" }, "在剧集卡片里重试", -1))
+                                _cache[79] || (_cache[79] = _createElementVNode("div", { class: "text-caption" }, "在剧集卡片里重试", -1))
                               ]),
                               _: 1
                             })
@@ -983,7 +1002,7 @@ return (_ctx, _cache) => {
                                         "prepend-icon": "mdi-refresh",
                                         onClick: _withModifiers($event => (retryJob(job)), ["stop"])
                                       }, {
-                                        default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
+                                        default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
                                           _createTextVNode(" 重试 ", -1)
                                         ]))]),
                                         _: 1
@@ -999,7 +1018,7 @@ return (_ctx, _cache) => {
                                         loading: running.value,
                                         onClick: _withModifiers($event => (askShareNow(job)), ["stop"])
                                       }, {
-                                        default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
+                                        default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
                                           _createTextVNode(" 立即分享 ", -1)
                                         ]))]),
                                         _: 1
@@ -1050,7 +1069,7 @@ return (_ctx, _cache) => {
                                           "prepend-icon": "mdi-content-copy",
                                           onClick: _withModifiers($event => (copyLink(job.share_url)), ["stop"])
                                         }, {
-                                          default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
+                                          default: _withCtx(() => [...(_cache[82] || (_cache[82] = [
                                             _createTextVNode("复制链接", -1)
                                           ]))]),
                                           _: 1
@@ -1114,7 +1133,7 @@ return (_ctx, _cache) => {
                         default: _withCtx(() => [
                           _createVNode(_component_v_card_title, { class: "text-subtitle-1" }, {
                             default: _withCtx(() => [
-                              _cache[82] || (_cache[82] = _createTextVNode(" 分享历史 ", -1)),
+                              _cache[83] || (_cache[83] = _createTextVNode(" 分享历史 ", -1)),
                               (selectedJobId.value)
                                 ? (_openBlock(), _createElementBlock("span", _hoisted_45, " 当前剧集: 点剧集卡片可切换 "))
                                 : _createCommentVNode("", true)
@@ -1129,7 +1148,7 @@ return (_ctx, _cache) => {
                                   class: "p115-table"
                                 }, {
                                   default: _withCtx(() => [
-                                    _cache[83] || (_cache[83] = _createElementVNode("thead", null, [
+                                    _cache[84] || (_cache[84] = _createElementVNode("thead", null, [
                                       _createElementVNode("tr", null, [
                                         _createElementVNode("th", null, "时间"),
                                         _createElementVNode("th", null, "操作"),
@@ -1199,7 +1218,7 @@ return (_ctx, _cache) => {
               type: "info",
               variant: "tonal"
             }, {
-              default: _withCtx(() => [...(_cache[84] || (_cache[84] = [
+              default: _withCtx(() => [...(_cache[85] || (_cache[85] = [
                 _createTextVNode(" 还没有配置任务, 点左侧「新建任务」新增一个。 ", -1)
               ]))]),
               _: 1
@@ -1215,7 +1234,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, null, {
-              default: _withCtx(() => [...(_cache[85] || (_cache[85] = [
+              default: _withCtx(() => [...(_cache[86] || (_cache[86] = [
                 _createTextVNode("115 登录", -1)
               ]))]),
               _: 1
@@ -1237,7 +1256,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[13] || (_cache[13] = $event => (loginDialog.value.show = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[86] || (_cache[86] = [
+                  default: _withCtx(() => [...(_cache[87] || (_cache[87] = [
                     _createTextVNode("关闭", -1)
                   ]))]),
                   _: 1
@@ -1262,7 +1281,7 @@ return (_ctx, _cache) => {
               default: _withCtx(() => [
                 _createVNode(_component_v_card_title, { class: "d-flex align-center" }, {
                   default: _withCtx(() => [
-                    _cache[87] || (_cache[87] = _createTextVNode(" 全局设置 ", -1)),
+                    _cache[88] || (_cache[88] = _createTextVNode(" 全局设置 ", -1)),
                     _createVNode(_component_v_spacer),
                     _createVNode(_component_v_switch, {
                       modelValue: globalDialog.value.form.enabled,
@@ -1529,7 +1548,7 @@ return (_ctx, _cache) => {
                               color: "primary",
                               "hide-details": ""
                             }, null, 8, ["modelValue"]),
-                            _cache[88] || (_cache[88] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "关 = 分享成功后保留源文件, 只删临时目录；任务里可单独覆盖", -1))
+                            _cache[89] || (_cache[89] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "关 = 分享成功后保留源文件, 只删临时目录；任务里可单独覆盖", -1))
                           ]),
                           _: 1
                         }),
@@ -1545,7 +1564,7 @@ return (_ctx, _cache) => {
                               color: "primary",
                               "hide-details": ""
                             }, null, 8, ["modelValue"]),
-                            _cache[89] || (_cache[89] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "打开后每次 115 调用、每季完结判定都会记到 MoviePilot 日志; 平时建议关", -1))
+                            _cache[90] || (_cache[90] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "打开后每次 115 调用、每季完结判定都会记到 MoviePilot 日志; 平时建议关", -1))
                           ]),
                           _: 1
                         }),
@@ -1568,7 +1587,7 @@ return (_ctx, _cache) => {
                       ]),
                       _: 1
                     }),
-                    _cache[90] || (_cache[90] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-1" }, " 检查频率：cron 表达式, 5 段 (分 时 日 月 周)；一天一次如 0 8 * * *；每 6 小时 0 */6 * * *。 分享有效期固定为长期, 提取码固定为上面填写的值 (默认 wwdc)。 ", -1))
+                    _cache[91] || (_cache[91] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-1" }, " 检查频率：cron 表达式, 5 段 (分 时 日 月 周)；一天一次如 0 8 * * *；每 6 小时 0 */6 * * *。 分享有效期固定为长期, 提取码固定为上面填写的值 (默认 wwdc)。 ", -1))
                   ]),
                   _: 1
                 }),
@@ -1579,7 +1598,7 @@ return (_ctx, _cache) => {
                       variant: "text",
                       onClick: _cache[35] || (_cache[35] = $event => (globalDialog.value.show = false))
                     }, {
-                      default: _withCtx(() => [...(_cache[91] || (_cache[91] = [
+                      default: _withCtx(() => [...(_cache[92] || (_cache[92] = [
                         _createTextVNode("取消", -1)
                       ]))]),
                       _: 1
@@ -1588,7 +1607,7 @@ return (_ctx, _cache) => {
                       color: "primary",
                       onClick: saveGlobal
                     }, {
-                      default: _withCtx(() => [...(_cache[92] || (_cache[92] = [
+                      default: _withCtx(() => [...(_cache[93] || (_cache[93] = [
                         _createTextVNode("保存全局设置", -1)
                       ]))]),
                       _: 1
@@ -1605,7 +1624,7 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode(_component_v_dialog, {
       modelValue: taskDialog.value.show,
-      "onUpdate:modelValue": _cache[44] || (_cache[44] = $event => ((taskDialog.value.show) = $event)),
+      "onUpdate:modelValue": _cache[45] || (_cache[45] = $event => ((taskDialog.value.show) = $event)),
       "max-width": "640"
     }, {
       default: _withCtx(() => [
@@ -1711,11 +1730,27 @@ return (_ctx, _cache) => {
                               }, null, 8, ["modelValue"])
                             ]),
                             _: 1
+                          }),
+                          _createVNode(_component_v_col, {
+                            cols: "12",
+                            md: "6"
+                          }, {
+                            default: _withCtx(() => [
+                              _createVNode(_component_v_select, {
+                                modelValue: taskDialog.value.form.completion_rule,
+                                "onUpdate:modelValue": _cache[43] || (_cache[43] = $event => ((taskDialog.value.form.completion_rule) = $event)),
+                                items: completionRuleTaskItems,
+                                label: "剧集完结检查规则",
+                                hint: "跟随全局 = 用全局设置",
+                                "persistent-hint": ""
+                              }, null, 8, ["modelValue"])
+                            ]),
+                            _: 1
                           })
                         ]),
                         _: 1
                       }),
-                      _cache[93] || (_cache[93] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-1" }, " 检查频率：本任务独立的 cron 表达式；留空则用全局设置。 ", -1))
+                      _cache[94] || (_cache[94] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-1" }, " 检查频率：本任务独立的 cron 表达式；留空则用全局设置。 ", -1))
                     ])
                   ]),
                   _: 1
@@ -1725,9 +1760,9 @@ return (_ctx, _cache) => {
                     _createVNode(_component_v_spacer),
                     _createVNode(_component_v_btn, {
                       variant: "text",
-                      onClick: _cache[43] || (_cache[43] = $event => (taskDialog.value.show = false))
+                      onClick: _cache[44] || (_cache[44] = $event => (taskDialog.value.show = false))
                     }, {
-                      default: _withCtx(() => [...(_cache[94] || (_cache[94] = [
+                      default: _withCtx(() => [...(_cache[95] || (_cache[95] = [
                         _createTextVNode("取消", -1)
                       ]))]),
                       _: 1
@@ -1753,14 +1788,14 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode(_component_v_dialog, {
       modelValue: taskConfirmDelete.value.show,
-      "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((taskConfirmDelete.value.show) = $event)),
+      "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((taskConfirmDelete.value.show) = $event)),
       "max-width": "480"
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, null, {
-              default: _withCtx(() => [...(_cache[95] || (_cache[95] = [
+              default: _withCtx(() => [...(_cache[96] || (_cache[96] = [
                 _createTextVNode("删除任务", -1)
               ]))]),
               _: 1
@@ -1776,9 +1811,9 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_spacer),
                 _createVNode(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[45] || (_cache[45] = $event => (taskConfirmDelete.value.show = false))
+                  onClick: _cache[46] || (_cache[46] = $event => (taskConfirmDelete.value.show = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[96] || (_cache[96] = [
+                  default: _withCtx(() => [...(_cache[97] || (_cache[97] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -1787,7 +1822,7 @@ return (_ctx, _cache) => {
                   color: "error",
                   onClick: deleteTask
                 }, {
-                  default: _withCtx(() => [...(_cache[97] || (_cache[97] = [
+                  default: _withCtx(() => [...(_cache[98] || (_cache[98] = [
                     _createTextVNode("删除任务", -1)
                   ]))]),
                   _: 1
@@ -1803,14 +1838,14 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode(_component_v_dialog, {
       modelValue: shareConfirm.value.show,
-      "onUpdate:modelValue": _cache[49] || (_cache[49] = $event => ((shareConfirm.value.show) = $event)),
+      "onUpdate:modelValue": _cache[50] || (_cache[50] = $event => ((shareConfirm.value.show) = $event)),
       "max-width": "480"
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, null, {
-              default: _withCtx(() => [...(_cache[98] || (_cache[98] = [
+              default: _withCtx(() => [...(_cache[99] || (_cache[99] = [
                 _createTextVNode("立即分享", -1)
               ]))]),
               _: 1
@@ -1826,18 +1861,18 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_spacer),
                 _createVNode(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[47] || (_cache[47] = $event => (shareConfirm.value.show = false))
+                  onClick: _cache[48] || (_cache[48] = $event => (shareConfirm.value.show = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[99] || (_cache[99] = [
+                  default: _withCtx(() => [...(_cache[100] || (_cache[100] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
                 }),
                 _createVNode(_component_v_btn, {
                   color: "primary",
-                  onClick: _cache[48] || (_cache[48] = $event => (shareNow(shareConfirm.value.job, true)))
+                  onClick: _cache[49] || (_cache[49] = $event => (shareNow(shareConfirm.value.job, true)))
                 }, {
-                  default: _withCtx(() => [...(_cache[100] || (_cache[100] = [
+                  default: _withCtx(() => [...(_cache[101] || (_cache[101] = [
                     _createTextVNode("跳过延迟, 立即分享", -1)
                   ]))]),
                   _: 1
@@ -1856,6 +1891,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4762f722"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-8e9ec946"]]);
 
 export { Page as default };
